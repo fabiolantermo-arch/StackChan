@@ -1,0 +1,19 @@
+diff --git a/modules/drivers/sensors/si12t/si12t.js b/modules/drivers/sensors/si12t/si12t.js
+index ebbb3b4..ace55c9 100644
+--- a/modules/drivers/sensors/si12t/si12t.js
++++ b/modules/drivers/sensors/si12t/si12t.js
+@@ -136,6 +136,14 @@ class Si12T {
+ 				this.#io.writeUint8(register, value);
+ 		}
+ 
++		// Robottino (10 Nov 2026): while referenceReset is true the chip takes what it reads now as "nothing on the
++		// sensor" for the channels in use (Ref_rst1, data sheet 12.2.4); false lets it sense again. Clears a state
++		// in which the zones read a touch with nobody there.
++		if ("referenceReset" in options) {
++			const mask = options.referenceReset ? (1 << Math.min(8, this.#channels)) - 1 : 0;
++			this.#io.writeUint8(REG_REF_RESET1, mask);
++		}
++
+ 		if ("channels" in options) {
+ 			const channels = options.channels;
+ 			if (channels < MIN_CHANNELS || channels > MAX_CHANNELS)

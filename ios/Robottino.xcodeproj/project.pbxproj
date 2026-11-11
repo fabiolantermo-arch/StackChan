@@ -1,0 +1,39 @@
+// !$*UTF8*$!
+{
+ archiveVersion = 1; classes = {}; objectVersion = 56;
+ objects = {
+ A00000000000000000000001 = {isa = PBXProject; attributes = {LastUpgradeCheck = 2700;}; buildConfigurationList = A00000000000000000000009; compatibilityVersion = "Xcode 14.0"; developmentRegion = it; knownRegions = (it,en,Base); mainGroup = A00000000000000000000002; productRefGroup = A00000000000000000000003; projectDirPath = ""; projectRoot = ""; targets = (A00000000000000000000004);};
+ A00000000000000000000002 = {isa = PBXGroup; children = (A00000000000000000000005,A00000000000000000000003); sourceTree = "<group>";};
+ A00000000000000000000003 = {isa = PBXGroup; children = (A00000000000000000000006); name = Products; sourceTree = "<group>";};
+ A00000000000000000000004 = {isa = PBXNativeTarget; buildConfigurationList = A0000000000000000000000A; buildPhases = (A0000000000000000000000B,A0000000000000000000000C,A0000000000000000000000D); buildRules = (); dependencies = (); name = Robottino; productName = Robottino; productReference = A00000000000000000000006; productType = "com.apple.product-type.application";};
+ A00000000000000000000005 = {isa = PBXGroup; children = (A00000000000000000000007,A00000000000000000000008,A00000000000000000000040,A00000000000000000000041,A00000000000000000000044,A00000000000000000000046,A00000000000000000000047,A00000000000000000000048,A0000000000000000000004C); path = Robottino; sourceTree = "<group>";};
+ A0000000000000000000004C = {isa = PBXFileReference; lastKnownFileType = audio.mp3; path = Resources/sami-risata.mp3; sourceTree = "<group>";};
+ A0000000000000000000004D = {isa = PBXBuildFile; fileRef = A0000000000000000000004C;};
+ A00000000000000000000046 = {isa = PBXFileReference; lastKnownFileType = audio.mp3; path = Resources/danza-allegra.mp3; sourceTree = "<group>";};
+ A00000000000000000000047 = {isa = PBXFileReference; lastKnownFileType = audio.mp3; path = Resources/danza-dolce.mp3; sourceTree = "<group>";};
+ A00000000000000000000048 = {isa = PBXFileReference; lastKnownFileType = audio.mp3; path = Resources/danza-spaziale.mp3; sourceTree = "<group>";};
+ A00000000000000000000049 = {isa = PBXBuildFile; fileRef = A00000000000000000000046;};
+ A0000000000000000000004A = {isa = PBXBuildFile; fileRef = A00000000000000000000047;};
+ A0000000000000000000004B = {isa = PBXBuildFile; fileRef = A00000000000000000000048;};
+ A00000000000000000000044 = {isa = PBXFileReference; lastKnownFileType = audio.mp3; path = Resources/danza-robottino.mp3; sourceTree = "<group>";};
+ A00000000000000000000045 = {isa = PBXBuildFile; fileRef = A00000000000000000000044;};
+ A00000000000000000000040 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RobotLiveCore.swift; sourceTree = "<group>";};
+ A00000000000000000000041 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RobotLive.swift; sourceTree = "<group>";};
+ A00000000000000000000042 = {isa = PBXBuildFile; fileRef = A00000000000000000000040;};
+ A00000000000000000000043 = {isa = PBXBuildFile; fileRef = A00000000000000000000041;};
+ A00000000000000000000006 = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Robottino.app; sourceTree = BUILT_PRODUCTS_DIR;};
+ A00000000000000000000007 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources.swift; sourceTree = "<group>";};
+ A00000000000000000000008 = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>";};
+ A00000000000000000000009 = {isa = XCConfigurationList; buildConfigurations = (A00000000000000000000010,A00000000000000000000011); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;};
+ A0000000000000000000000A = {isa = XCConfigurationList; buildConfigurations = (A00000000000000000000012,A00000000000000000000013); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;};
+ A0000000000000000000000B = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A0000000000000000000000E,A00000000000000000000042,A00000000000000000000043); runOnlyForDeploymentPostprocessing = 0;};
+ A0000000000000000000000C = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0;};
+ A0000000000000000000000D = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A0000000000000000000000F,A00000000000000000000045,A00000000000000000000049,A0000000000000000000004A,A0000000000000000000004B,A0000000000000000000004D); runOnlyForDeploymentPostprocessing = 0;};
+ A0000000000000000000000E = {isa = PBXBuildFile; fileRef = A00000000000000000000007;};
+ A0000000000000000000000F = {isa = PBXBuildFile; fileRef = A00000000000000000000008;};
+ A00000000000000000000010 = {isa = XCBuildConfiguration; name = Debug; buildSettings = {SDKROOT = iphoneos; IPHONEOS_DEPLOYMENT_TARGET = 18.0; SWIFT_VERSION = 5.0; CLANG_ENABLE_MODULES = YES; INFOPLIST_KEY_NSCameraUsageDescription = "La camera frontale serve a imitare il tuo viso sul robot, solo quando lo attivi."; INFOPLIST_KEY_NSMicrophoneUsageDescription = "Il microfono serve a parlare con Robottino e alla chiamata audio con il robot, solo quando le avvii."; INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "Il Bluetooth serve a inviare la rete Wi-Fi al robot, solo quando lo chiedi.";};};
+ A00000000000000000000011 = {isa = XCBuildConfiguration; name = Release; buildSettings = {SDKROOT = iphoneos; IPHONEOS_DEPLOYMENT_TARGET = 18.0; SWIFT_VERSION = 5.0; CLANG_ENABLE_MODULES = YES; INFOPLIST_KEY_NSCameraUsageDescription = "La camera frontale serve a imitare il tuo viso sul robot, solo quando lo attivi."; INFOPLIST_KEY_NSMicrophoneUsageDescription = "Il microfono serve a parlare con Robottino e alla chiamata audio con il robot, solo quando le avvii."; INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "Il Bluetooth serve a inviare la rete Wi-Fi al robot, solo quando lo chiedi.";};};
+ A00000000000000000000012 = {isa = XCBuildConfiguration; name = Debug; buildSettings = {PRODUCT_BUNDLE_IDENTIFIER = com.example.robottino; PRODUCT_NAME = "$(TARGET_NAME)"; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_CFBundleDisplayName = Robottino; INFOPLIST_KEY_UILaunchScreen_Generation = YES; INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES; ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; TARGETED_DEVICE_FAMILY = 1; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; MARKETING_VERSION = 0.1; SWIFT_OPTIMIZATION_LEVEL = "-Onone";};};
+ A00000000000000000000013 = {isa = XCBuildConfiguration; name = Release; buildSettings = {PRODUCT_BUNDLE_IDENTIFIER = com.example.robottino; PRODUCT_NAME = "$(TARGET_NAME)"; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_CFBundleDisplayName = Robottino; INFOPLIST_KEY_UILaunchScreen_Generation = YES; INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES; ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; TARGETED_DEVICE_FAMILY = 1; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; MARKETING_VERSION = 0.1; SWIFT_OPTIMIZATION_LEVEL = "-O";};};
+ }; rootObject = A00000000000000000000001;
+}

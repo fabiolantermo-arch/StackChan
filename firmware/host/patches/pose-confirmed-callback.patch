@@ -1,0 +1,59 @@
+diff --git a/firmware/host/app/capabilities.ts b/firmware/host/app/capabilities.ts
+index 00b58ae..8d4aa03 100644
+--- a/firmware/host/app/capabilities.ts
++++ b/firmware/host/app/capabilities.ts
+@@ -112,7 +112,7 @@ export type MotionCapability = {
+   pose: MotionControllerPose
+   lookAt(position: Vector3): void
+   lookAway(): void
+-  setPose(pose: Pose, time?: MotionDurationSeconds): Promise<void>
++  setPose(pose: Pose, time?: MotionDurationSeconds, onConfirmed?: () => void): Promise<void>
+   setTorque(torque: boolean): Promise<void>
+ }
+ 
+diff --git a/firmware/host/app/runtime-context.ts b/firmware/host/app/runtime-context.ts
+index 36d67e3..e060541 100644
+--- a/firmware/host/app/runtime-context.ts
++++ b/firmware/host/app/runtime-context.ts
+@@ -298,8 +298,28 @@ export class StackchanRuntimeContext implements StackchanContext {
+    * @returns void when the robot start moving
+    * @experimental
+    */
+-  async setPose(pose: Pose, time?: number): Promise<void> {
+-    return waitForCompletion((callback) => this.#motionController.setPose(pose, time, callback))
++  // Robottino (10 Nov 2026): onConfirmed is called at the very moment the servos confirm the command, before the
++  // promise settles. With the robot busy (speaking and following a face) each promise turn waits in the message
++  // queue for up to 0.4 s, and a pose that the servos had confirmed in time looked unconfirmed after 1.2 s.
++  async setPose(pose: Pose, time?: number, onConfirmed?: () => void): Promise<void> {
++    return waitForCompletion((callback) =>
++      this.#motionController.setPose(
++        pose,
++        time,
++        typeof onConfirmed === 'function'
++          ? (error) => {
++              if (error == null) {
++                try {
++                  onConfirmed()
++                } catch {
++                  // the listener's own error must not turn a confirmed pose into a failed one
++                }
++              }
++              callback(error)
++            }
++          : callback,
++      ),
++    )
+   }
+ 
+   /**
+@@ -431,8 +451,8 @@ export class StackchanRuntimeContext implements StackchanContext {
+       lookAway() {
+         context.lookAway()
+       },
+-      setPose(pose, time) {
+-        return context.setPose(pose, time)
++      setPose(pose, time, onConfirmed) {
++        return context.setPose(pose, time, onConfirmed)
+       },
+       setTorque(torque) {
+         return context.setTorque(torque)

@@ -1,0 +1,31 @@
+diff --git a/xs/platforms/esp/xsPlatform.c b/xs/platforms/esp/xsPlatform.c
+index 01d4d13..6bd49bd 100644
+--- a/xs/platforms/esp/xsPlatform.c
++++ b/xs/platforms/esp/xsPlatform.c
+@@ -272,6 +272,26 @@ void fxAbort(txMachine* the, int status)
+ 	#endif
+ #endif
+ 
++#if ESP32 && !defined(mxDebug) && !defined(mxInstrument) && !defined(MODDEF_XS_ABORTHOOK)
++	// Robottino (10 Nov 2026): a release host restarted without a word (rst:0xc). Say why on the console first:
++	// the status (xs.h: 1 not enough memory, 2 JavaScript stack overflow, 3 native stack overflow, 5 unhandled
++	// exception, 6 unhandled rejection, ...) and, for an exception, its message.
++	{
++		const char *why = "";
++		if (XS_UNHANDLED_EXCEPTION_EXIT == status) {
++			mxPush(mxException);
++			mxGetID(mxID(_message));
++			if ((the->stack->kind == XS_STRING_KIND) || (the->stack->kind == XS_STRING_X_KIND))
++				why = the->stack->value.string;
++		}
++		printf("[robottino] XS abort status=%d %s\n", status, why);
++		// Where the program was (addresses for addr2line with the build's xs_esp32.elf): status 9, native stack
++		// overflow, says nothing else (10 Nov 2026, 22:32).
++		extern void esp_backtrace_print(int depth);
++		esp_backtrace_print(40);
++	}
++#endif
++
+ #if MODDEF_XS_ABORT_EXITTOHOST
+ 	the->exitStatus = status;
+ 	fxExitToHost(the);

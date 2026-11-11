@@ -1,0 +1,10 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "robottino-stackchan",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-06",
+  "observability": {"enabled":true,"logs":{"enabled":true,"head_sampling_rate":1},"traces":{"enabled":true,"head_sampling_rate":0.1}},
+  "vars": {"OWNER_NAME":"","ALLOW_SWEARING":"false","OPENAI_MODEL":"gpt-live-1","ELEVENLABS_AGENT_ID":"agent_00000000000000000000000000"},
+  "durable_objects": {"bindings":[{"name":"CHAT_SESSIONS","class_name":"ChatSession"},{"name":"ROBOT_MEMORY","class_name":"RobotMemory"},{"name":"ROBOT_LINK","class_name":"RobotLink"},{"name":"ROBOT_PAIRING","class_name":"RobotPairing"}]},
+  "migrations": [{"tag":"v1","new_sqlite_classes":["ChatSession"]},{"tag":"v2-memory","new_sqlite_classes":["RobotMemory"]},{"tag":"v3-robot-link","new_sqlite_classes":["RobotLink"]},{"tag":"v4-robot-pairing","new_sqlite_classes":["RobotPairing"]}]
+}

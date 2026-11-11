@@ -1,0 +1,279 @@
+diff --git a/firmware/host/modules/motion/__tests__/single-wait-slot.test.ts b/firmware/host/modules/motion/__tests__/single-wait-slot.test.ts
+index 9c558c7..e0125bd 100644
+--- a/firmware/host/modules/motion/__tests__/single-wait-slot.test.ts
++++ b/firmware/host/modules/motion/__tests__/single-wait-slot.test.ts
+@@ -97,3 +97,108 @@ test('SingleWaitSlot reports overlapping waits without queuing them', () => {
+     false,
+   )
+ })
++
++// Robottino (10 Nov 2026): a reply that arrived in time but was read late is not a timeout.
++test('SingleWaitSlot lets beforeTimeout deliver a reply that was already there', () => {
++  let scheduled: (() => void) | null = null
++  let timedOut = false
++  let result: number[] | undefined
++  let cleared = 0
++  const slot: SingleWaitSlot<number[]> = new SingleWaitSlot<number[]>(
++    (handler) => {
++      scheduled = handler
++      return Symbol('timer')
++    },
++    () => {
++      cleared++
++    },
++  )
++  slot.wait(
++    10,
++    (value) => {
++      result = value
++    },
++    () => {
++      timedOut = true
++    },
++    () => slot.resolve([7]),
++  )
++  scheduled?.()
++  assert.deepEqual(result, [7])
++  assert.equal(timedOut, false)
++  assert.equal(slot.isWaiting, false)
++  assert.equal(cleared, 0, 'the timer has already fired: nothing to clear')
++})
++
++test('SingleWaitSlot still times out when beforeTimeout finds nothing', () => {
++  let scheduled: (() => void) | null = null
++  let timedOut = false
++  let called = false
++  let looked = 0
++  const slot = new SingleWaitSlot<number[]>(
++    (handler) => {
++      scheduled = handler
++      return Symbol('timer')
++    },
++    () => {},
++  )
++  slot.wait(
++    10,
++    () => {
++      called = true
++    },
++    () => {
++      timedOut = true
++    },
++    () => {
++      looked++
++    },
++  )
++  scheduled?.()
++  assert.equal(looked, 1)
++  assert.equal(called, false)
++  assert.equal(timedOut, true)
++  assert.equal(slot.isWaiting, false)
++  // A reply after the timeout is ignored, as before.
++  slot.resolve([1])
++  assert.equal(called, false)
++})
++
++test('SingleWaitSlot leaves alone a wait started by the late reply', () => {
++  const timers: (() => void)[] = []
++  let firstTimedOut = false
++  let secondTimedOut = false
++  let second: number[] | undefined
++  const slot: SingleWaitSlot<number[]> = new SingleWaitSlot<number[]>(
++    (handler) => {
++      timers.push(handler)
++      return Symbol('timer')
++    },
++    () => {},
++  )
++  slot.wait(
++    10,
++    () => {
++      // the next command of the chain starts from the reply's callback
++      slot.wait(
++        10,
++        (value) => {
++          second = value
++        },
++        () => {
++          secondTimedOut = true
++        },
++      )
++    },
++    () => {
++      firstTimedOut = true
++    },
++    () => slot.resolve([1]),
++  )
++  timers[0]()
++  assert.equal(firstTimedOut, false)
++  assert.equal(slot.isWaiting, true, 'the second wait is still pending')
++  slot.resolve([2])
++  assert.deepEqual(second, [2])
++  assert.equal(secondTimedOut, false)
++})
+diff --git a/firmware/host/modules/motion/internal/single-wait-slot.ts b/firmware/host/modules/motion/internal/single-wait-slot.ts
+index 447a778..cc9ee9d 100644
+--- a/firmware/host/modules/motion/internal/single-wait-slot.ts
++++ b/firmware/host/modules/motion/internal/single-wait-slot.ts
+@@ -18,17 +18,27 @@ export default class SingleWaitSlot<T> {
+     return this.#callback != null
+   }
+ 
+-  wait(timeout: number, callback: WaitSlotCallback<T>, onTimeout?: () => void): boolean {
++  // Robottino (10 Nov 2026): beforeTimeout runs when the time is up and before the wait is given up. It may
++  // resolve the wait (a reply that had already arrived and was not read yet, because the program was busy and
++  // timers are served before incoming data): then there is no timeout. A wait started meanwhile is left alone.
++  wait(timeout: number, callback: WaitSlotCallback<T>, onTimeout?: () => void, beforeTimeout?: () => void): boolean {
+     if (this.#callback != null) {
+       return false
+     }
+-    this.#callback = (value) => {
++    const pending: WaitSlotCallback<T> = (value) => {
+       this.#callback = null
+       callback(value)
+     }
++    this.#callback = pending
+     this.#timerHandle = this.#setTimer(() => {
+-      this.#callback = null
+       this.#timerHandle = null
++      if (beforeTimeout) {
++        beforeTimeout()
++        if (this.#callback !== pending) {
++          return
++        }
++      }
++      this.#callback = null
+       onTimeout?.()
+     }, timeout)
+     return true
+diff --git a/firmware/host/modules/motion/protocols/scservo.ts b/firmware/host/modules/motion/protocols/scservo.ts
+index 4ae196d..a3a33d6 100644
+--- a/firmware/host/modules/motion/protocols/scservo.ts
++++ b/firmware/host/modules/motion/protocols/scservo.ts
+@@ -4,6 +4,7 @@ import { PayloadBuffer } from 'payload-buffer'
+ 
+ import { CommandTimeoutError } from 'servo-command-error'
+ import SingleWaitSlot from 'single-wait-slot'
++import Time from 'time'
+ import Timer from 'timer'
+ 
+ type Maybe<T> =
+@@ -75,12 +76,17 @@ class PacketHandler extends Serial {
+   #idx: number
+   #state: RxState
+   #count: number
++  #drain: (this: PacketHandler, byte: number) => number
+   constructor(option) {
+-    const onReadable = function (this: PacketHandler, byte: number) {
++    const onReadable = function (this: PacketHandler, byte: number): number {
+       const rxBuf = this.#rxBuffer
++      let taken = 0
+       for (let b = 0; b < byte; b++) {
+-        // NOTE: We can safely read a number
+-        rxBuf[this.#idx++] = this.read() as number
++        // Robottino (10 Nov 2026): poll() may have taken the bytes already; read() then gives nothing.
++        const value = this.read() as number | undefined
++        if (value === undefined) break
++        taken++
++        rxBuf[this.#idx++] = value
+         switch (this.#state) {
+           case RX_STATE.SEEK:
+             if (this.#idx >= 2) {
+@@ -130,6 +136,7 @@ class PacketHandler extends Serial {
+         }
+         // noop
+       }
++      return taken
+     }
+     super({
+       ...option,
+@@ -141,6 +148,16 @@ class PacketHandler extends Serial {
+     this.#payloadBuffer = new PayloadBuffer(32)
+     this.#idx = 0
+     this.#state = RX_STATE.SEEK
++    this.#drain = onReadable
++  }
++  /**
++   * Robottino (10 Nov 2026): reads now whatever the servos have already sent, without waiting for the
++   * onReadable message. Called when a command's time is up: with the program busy for more than the
++   * timeout, the timer fired before the reply (already in the UART) had been read, and a servo that had
++   * answered was reported as silent. At most one receive buffer; returns the bytes taken.
++   */
++  poll(): number {
++    return this.#drain.call(this, 64)
+   }
+   hasCallbackOf(id: number): boolean {
+     return this.#callbacks.has(id)
+@@ -188,6 +205,7 @@ type PendingCommand = {
+   onResult: CommandCallback
+   onError: ErrorCallback
+   values: number[]
++  queuedAt: number
+ }
+ const COMMAND_BUSY_ERROR = 'command is already waiting for response'
+ const COMMAND_TIMEOUT_MS = 120
+@@ -306,10 +324,20 @@ class SCServo {
+           deferNoResponseResult(onResult, onError)
+           return
+         }
+-        const waiting = this.#waitSlot.wait(COMMAND_TIMEOUT_MS, onResult, () => {
+-          trace(`[scservo] timeout id=${this.#id} command=${command} address=${address}\n`)
+-          onError(new CommandTimeoutError('scservo', COMMAND_TIMEOUT_MS))
+-        })
++        const wroteAt = Time.ticks
++        const waiting = this.#waitSlot.wait(
++          COMMAND_TIMEOUT_MS,
++          onResult,
++          () => {
++            trace(`[scservo] timeout id=${this.#id} command=${command} address=${address}\n`)
++            onError(new CommandTimeoutError('scservo', COMMAND_TIMEOUT_MS))
++          },
++          () => {
++            // Robottino (10 Nov 2026): the reply may be waiting unread; read it before giving up.
++            const late = packetHandler.poll()
++            if (late > 0) trace(`[scservo] late read id=${this.#id} bytes=${late} after=${Time.ticks - wroteAt}\n`)
++          },
++        )
+         if (!waiting) {
+           onError(new Error(COMMAND_BUSY_ERROR))
+         } else {
+@@ -358,7 +386,7 @@ class SCServo {
+     onError: ErrorCallback,
+     ...values: number[]
+   ): boolean {
+-    this.#commandQueue.push({ command, address, onResult, onError, values })
++    this.#commandQueue.push({ command, address, onResult, onError, values, queuedAt: Time.ticks })
+     this.#drainCommandQueue()
+     return true
+   }
+@@ -367,10 +395,22 @@ class SCServo {
+     if (this.#isWriting || this.#waitSlot.isWaiting) return
+     const pending = this.#commandQueue.shift()
+     if (pending == null) return
++    // Robottino, TEMPORARY diagnostics (10 Nov 2026): a command that took 200 ms or more from the request to its
++    // result, with the part spent waiting in this servo's queue before it was written.
++    const startedAt = Time.ticks
++    const noteSlow = (outcome: string) => {
++      const total = Time.ticks - pending.queuedAt
++      if (total >= 200) {
++        trace(
++          `[scservo] slow id=${this.#id} command=${pending.command} address=${pending.address} queued=${startedAt - pending.queuedAt} total=${total} ${outcome}\n`,
++        )
++      }
++    }
+     this.#dispatchCommand(
+       pending.command,
+       pending.address,
+       (values) => {
++        noteSlow('ok')
+         try {
+           pending.onResult(values)
+         } finally {
+@@ -378,6 +418,7 @@ class SCServo {
+         }
+       },
+       (error) => {
++        noteSlow('error')
+         try {
+           pending.onError(error)
+         } finally {

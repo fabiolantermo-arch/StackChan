@@ -1,0 +1,92 @@
+{
+  "include": [
+    "$(MODDABLE)/examples/manifest_mod.json"
+  ],
+  "config": {
+    "driver": {
+      "config": {
+        "yaw": {"angleLimit": {"min": -1440, "max": 1690}},
+        "pitch": {"angleLimit": {"min": -1940, "max": 1190}}
+      }
+    }
+  },
+  "modules": {
+    "*": "./mod",
+    "robottino-face": "./face",
+    "robottino-portrait-state": "./portrait-state",
+    "robottino-touch-reaction": "./touch-reaction",
+    "robottino-dance": "./dance",
+    "robottino-clock": "./clock",
+    "robottino-tracker": "./tracker",
+    "robottino-live-device": "./live-device",
+    "robottino-live-wire": "./live-wire",
+    "robottino-socket": "./socket",
+    "robottino-voice-device": "./voice-device",
+    "robottino-voice-wire": "./voice-wire",
+    "robottino-reminders": "./reminders",
+    "robottino-wifi-switch": "./wifi-switch",
+    "robottino-pairing-device": "./pairing-device",
+    "robottino-lights": "./lights",
+    "robottino-calibration": "./calibration",
+    "mediapipe-tracking-message": "./vendor/tracking-message"
+  },
+  "resources": {
+    "*": [
+      "./assets/sami-risata.bin",
+      "./assets/avviso.bin",
+      "./assets/prova-voce.bin",
+      "./assets/prova-voce-ima.bin"
+    ],
+    "*-color": [
+      "./assets/girl-neutral",
+      "./assets/girl-happy",
+      "./assets/girl-sad",
+      "./assets/girl-angry",
+      "./assets/girl-angry-mouth-1",
+      "./assets/girl-angry-mouth-2",
+      "./assets/girl-angry-mouth-3",
+      "./assets/girl-angry-mouth-4",
+      "./assets/girl-sad-mouth-1",
+      "./assets/girl-sad-mouth-2",
+      "./assets/girl-sad-mouth-3",
+      "./assets/girl-sad-mouth-4",
+      "./assets/girl-blink",
+      "./assets/girl-mouth-1",
+      "./assets/girl-mouth-2",
+      "./assets/girl-mouth-3",
+      "./assets/girl-mouth-4",
+      "./assets/white-neutral",
+      "./assets/white-happy",
+      "./assets/white-sad",
+      "./assets/white-angry",
+      "./assets/white-angry-mouth-1",
+      "./assets/white-angry-mouth-2",
+      "./assets/white-angry-mouth-3",
+      "./assets/white-angry-mouth-4",
+      "./assets/white-sad-mouth-1",
+      "./assets/white-sad-mouth-2",
+      "./assets/white-sad-mouth-3",
+      "./assets/white-sad-mouth-4",
+      "./assets/white-blink",
+      "./assets/white-mouth-2",
+      "./assets/white-mouth-4",
+      "./assets/red-neutral",
+      "./assets/red-happy",
+      "./assets/red-sad",
+      "./assets/red-angry",
+      "./assets/red-angry-mouth-1",
+      "./assets/red-angry-mouth-2",
+      "./assets/red-angry-mouth-3",
+      "./assets/red-angry-mouth-4",
+      "./assets/red-sad-mouth-1",
+      "./assets/red-sad-mouth-2",
+      "./assets/red-sad-mouth-3",
+      "./assets/red-sad-mouth-4",
+      "./assets/red-blink",
+      "./assets/red-mouth-1",
+      "./assets/red-mouth-2",
+      "./assets/red-mouth-3",
+      "./assets/red-mouth-4"
+    ]
+  }
+}

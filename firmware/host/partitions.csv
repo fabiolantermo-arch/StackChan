@@ -1,0 +1,9 @@
+# Robottino: tabella partizioni per l'host Moddable m5stackchan_cores3 (flash 16 MB).
+# Upstream riserva al MOD solo 256 KB; il MOD Robottino pesa circa 3,7 MB.
+# Host compilato (10.1.0) circa 6,7 MB: factory 9 MB, xs 6 MB.
+# Name,   Type, SubType, Offset,   Size
+nvs,      data, nvs,     0x9000,   0x006000,
+phy_init, data, phy,     0xf000,   0x001000,
+factory,  app,  factory, 0x10000,  0x900000,
+xs,       0x40, 1,       0x910000, 0x600000,
+storage,  data, spiffs,  0xF10000, 0x010000,

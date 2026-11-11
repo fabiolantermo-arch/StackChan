@@ -1,0 +1,16 @@
+diff --git a/modules/embedded/io/audio/in/esp32/audioin.c b/modules/embedded/io/audio/in/esp32/audioin.c
+index 893c66e..41da75f 100644
+--- a/modules/embedded/io/audio/in/esp32/audioin.c
++++ b/modules/embedded/io/audio/in/esp32/audioin.c
+@@ -97,7 +97,10 @@
+ 
+ #define AUDIO_IN_TIMEOUT	50
+ #define MAX_INPUT_BLOCK		2048
+-#define AUDIO_IN_BUFFERSIZE	(8192 * 2)
++// Robottino (11 Nov 2026): 64 KB instead of 16 KB. On the CoreS3 a mono 16 kHz sample takes 4 bytes here (64000
++// bytes a second), so 16 KB held 256 ms: the MOD's callbacks come up to 340 ms apart, and about a fifth of what the
++// user said was lost before the speech recognition (measured: 25.6-28 of 32 KB/s). 64 KB hold one second.
++#define AUDIO_IN_BUFFERSIZE	(8192 * 8)
+ 
+ enum {
+ 	kStateIdle = 0,

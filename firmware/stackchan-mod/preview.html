@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="it"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Robottino · nuovo volto</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#080f1c;color:#f7f1ed;font:16px system-ui;text-align:center;padding:36px 18px}
+main{max-width:760px;margin:auto}h1{font-size:28px;font-weight:600;margin:6px 0 10px}.subtitle{color:#bab2c5;margin:0 0 26px}
+.screen{width:min(640px,100%);aspect-ratio:4/3;background:#051136;border:8px solid #263248;border-radius:30px;overflow:hidden;box-shadow:0 20px 70px #0008;margin:auto}img{width:100%;height:100%;object-fit:contain;display:block}
+.controls{display:flex;justify-content:center;flex-wrap:wrap;gap:10px;margin:24px auto}button{font:inherit;border:1px solid #4c4560;border-radius:24px;background:#1c2032;color:#eee;padding:10px 19px;cursor:pointer}button[aria-pressed=true]{background:#eac0d4;color:#2c2037;border-color:#eac0d4}label{display:block;margin:18px}p{color:#aaa6b8;line-height:1.5}small{color:#aaa6b8}
+</style><main><h1>Il nuovo volto di Robottino</h1><p class="subtitle">Solo viso</p>
+<div class="screen"><img id="portrait" src="./assets/girl-neutral.png" alt="Volto biondo con occhi azzurri e sorriso dolce"></div>
+<div class="controls"><button data-emotion="0" aria-pressed="true">Serena</button><button data-emotion="3" aria-pressed="false">Felice</button><button data-emotion="2" aria-pressed="false">Pensierosa</button></div>
+<label><input id="speaking" type="checkbox"> Prova la bocca mentre parla</label>
+<p>Un volto morbido, capelli biondi, occhi azzurri e ammiccamento naturale.<br>La prova della bocca è simulata; sul robot seguirà l’audio effettivamente riprodotto.</p>
+<small>Anteprima grafica. Nessun robot collegato. Il movimento della testa verrà verificato sull’hardware.</small></main>
+<script type="module">
+import{portraitFrame,PORTRAIT_FRAMES}from'./portrait-state.js';
+const img=document.querySelector('#portrait'),speaking=document.querySelector('#speaking');let emotion=0,previous='';
+for(const name of PORTRAIT_FRAMES){const image=new Image();image.src=`./assets/girl-${name}.png`;}
+document.querySelectorAll('button').forEach(button=>button.onclick=()=>{emotion=Number(button.dataset.emotion);document.querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed',String(b===button)));});
+function draw(time){const frame=portraitFrame({emotion,mouth:{open:speaking.checked?Math.abs(Math.sin(time/160))*.8:0}},time);if(frame!==previous){img.src=`./assets/girl-${frame}.png`;previous=frame;}requestAnimationFrame(draw);}requestAnimationFrame(draw);
+</script></html>

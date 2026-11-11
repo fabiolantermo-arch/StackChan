@@ -1,0 +1,99 @@
+diff --git a/modules/pins/i2s/audioout.c b/modules/pins/i2s/audioout.c
+index a1dbf03..cff3972 100644
+--- a/modules/pins/i2s/audioout.c
++++ b/modules/pins/i2s/audioout.c
+@@ -314,6 +314,13 @@ typedef struct {
+ 	int									pendingCallbackCount;
+ 	modAudioOutPendingCallbackRecord	pendingCallbacks[MODDEF_AUDIOOUT_QUEUELENGTH];
+ 
++#if ESP32
++	// Robottino (10 Nov 2026): callback messages posted to the machine and not delivered yet. close() used to free
++	// the instance while one was on its way, and deliverCallbacks then read freed memory (Guru Meditation).
++	int32_t								messagesPending;
++	uint8_t								closed;
++#endif
++
+ 	modAudioOutStreamRecord	stream[1];		// must be last
+ } modAudioOutRecord, *modAudioOut;
+ 
+@@ -337,6 +344,9 @@ static void updateActiveStreams(modAudioOut out);
+ 	void deliverCallbacks(void *the, void *refcon, uint8_t *message, uint16_t messageLength);
+ 	void queueCallback(modAudioOut out, xsIntegerValue id, xsIntegerValue stream);
+ #endif
++#if ESP32
++	static void deliverCallbacksMessage(void *the, void *refcon, uint8_t *message, uint16_t messageLength);
++#endif
+ #if __linux
+ 	static void queueCallback(modAudioOut out, xsIntegerValue id, xsIntegerValue stream);
+ #endif
+@@ -649,6 +659,12 @@ void xs_audioout_close(xsMachine *the)
+ 
+ 			vSemaphoreDelete(out->mutex);
+ 		}
++
++		// Robottino (10 Nov 2026): the task has ended, so no more callback messages are posted. Those already on
++		// their way still point at this instance: keep it until the last one has arrived (deliverCallbacksMessage).
++		out->closed = 1;
++		if (__atomic_load_n(&out->messagesPending, __ATOMIC_SEQ_CST) > 0)
++			upUseCount(out);
+ #endif
+ 
+ 		downUseCount(out);
+@@ -1805,7 +1821,12 @@ void deliverCallbacks(void *the, void *refcon, uint8_t *message, uint16_t messag
+ 
+ 	upUseCount(out);
+ 
++#if ESP32
++	// Robottino (10 Nov 2026): closed from inside a callback: the mutex is gone, nothing more is delivered.
++	while (out->pendingCallbackCount && !out->closed) {
++#else
+ 	while (out->pendingCallbackCount) {
++#endif
+ 		xsIntegerValue id;
+ 		xsIntegerValue stream;
+ 
+@@ -1840,6 +1861,25 @@ void deliverCallbacks(void *the, void *refcon, uint8_t *message, uint16_t messag
+ 	downUseCount(out);
+ }
+ 
++#if ESP32
++// Robottino (10 Nov 2026): the message posted by queueCallback. It is counted, so that close() knows whether one
++// is still on its way; if the instance was closed meanwhile, nothing is delivered and the last message to arrive
++// releases what close() kept.
++void deliverCallbacksMessage(void *the, void *refcon, uint8_t *message, uint16_t messageLength)
++{
++	modAudioOut out = refcon;
++	int32_t left = __atomic_sub_fetch(&out->messagesPending, 1, __ATOMIC_SEQ_CST);
++
++	if (out->closed) {
++		if (left <= 0)
++			downUseCount(out);
++		return;
++	}
++
++	deliverCallbacks(the, refcon, message, messageLength);
++}
++#endif
++
+ // note: queueCallback relies on caller to lock mutex
+ void queueCallback(modAudioOut out, xsIntegerValue id, xsIntegerValue stream)
+ {
+@@ -1847,12 +1887,17 @@ void queueCallback(modAudioOut out, xsIntegerValue id, xsIntegerValue stream)
+ 		out->pendingCallbacks[out->pendingCallbackCount].id = id;
+ 		out->pendingCallbacks[out->pendingCallbackCount++].stream = stream;
+ 
+-		if (1 == out->pendingCallbackCount)
++		if (1 == out->pendingCallbackCount) {
+ #if defined(_WIN32)
+ 			PostMessage(out->hWnd, WM_CALLBACK, 0, (LPARAM)out);
++#elif ESP32
++			__atomic_add_fetch(&out->messagesPending, 1, __ATOMIC_SEQ_CST);
++			if (0 != modMessagePostToMachine(out->the, NULL, 0, deliverCallbacksMessage, out))
++				__atomic_sub_fetch(&out->messagesPending, 1, __ATOMIC_SEQ_CST);
+ #else
+ 			modMessagePostToMachine(out->the, NULL, 0, deliverCallbacks, out);
+ #endif
++		}
+ 	}
+ 	else
+ 		modLog("audio callback queue full");
