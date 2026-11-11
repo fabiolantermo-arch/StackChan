@@ -4,7 +4,7 @@
 
 Un compagno da scrivania costruito su **M5Stack StackChan K151** (CoreS3, ESP32-S3): parla, muove la testa quando glielo chiedi, cambia faccia e umore, segue un viso e ti dice che cosa vede con la sua fotocamera.
 
-https://github.com/user-attachments/assets/97672104-78df-42dc-a973-b0203a75e100
+https://github.com/user-attachments/assets/643a9ec8-144d-4e09-ad5a-6bd13a1ad10c
 
 49 secondi: il robot su una scrivania, mentre parla e si muove. Se il lettore non compare, il file è [docs/media/demo.mp4](docs/media/demo.mp4).
 

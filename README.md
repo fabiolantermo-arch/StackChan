@@ -4,7 +4,7 @@
 
 A desk companion built on the **M5Stack StackChan K151** (CoreS3, ESP32-S3): it talks, moves its head when asked, changes its face and mood, follows a face, and tells you what it sees through its camera.
 
-https://github.com/user-attachments/assets/97672104-78df-42dc-a973-b0203a75e100
+https://github.com/user-attachments/assets/643a9ec8-144d-4e09-ad5a-6bd13a1ad10c
 
 49 seconds: the robot on a desk, talking and moving. If the player does not show, the file is [docs/media/demo.mp4](docs/media/demo.mp4).
 
