@@ -1,0 +1,16 @@
+diff --git a/build/devices/esp32/xsProj-esp32s3/main/CMakeLists.txt b/build/devices/esp32/xsProj-esp32s3/main/CMakeLists.txt
+index 9150b4f..7b389a0 100644
+--- a/build/devices/esp32/xsProj-esp32s3/main/CMakeLists.txt
++++ b/build/devices/esp32/xsProj-esp32s3/main/CMakeLists.txt
+@@ -80,3 +80,11 @@ add_prebuilt_library(xsesp32 ${CMAKE_BINARY_DIR}/xs_${ESP32_SUBCLASS}.a
+ 
+ target_link_libraries(${COMPONENT_LIB} PRIVATE xsesp32)
+ 
++# Robottino (firmware/host/build-host.mjs): sources of the host that cannot be XS modules (C++ that uses ESP-IDF
++# components), compiled with the project. Each such file defines robottino_main_sources, named here so that the
++# linker keeps it.
++if (DEFINED ENV{ROBOTTINO_MAIN_SOURCES})
++	target_sources(${COMPONENT_TARGET} PRIVATE $ENV{ROBOTTINO_MAIN_SOURCES})
++	target_link_libraries(${COMPONENT_LIB} INTERFACE "-u robottino_main_sources")
++endif()
++

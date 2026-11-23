@@ -24,7 +24,9 @@ const output=path.join(root,'firmware/artifacts');mkdirSync(output,{recursive:tr
 copyFileSync(archive,path.join(output,'robottino-portrait.xsa'));
 writeFileSync(path.join(output,'THIRD-PARTY-LICENSES.txt'),
   'Stack-chan (Apache-2.0)\n'+readFileSync(path.join(root,'firmware/stackchan-mod/vendor/LICENSE-stack-chan'),'utf8')+
-  '\nM5Stack factory dance reference (MIT)\n'+readFileSync(path.join(root,'firmware/stackchan-mod/vendor/LICENSE-m5stack'),'utf8'));
+  '\nM5Stack factory dance reference (MIT)\n'+readFileSync(path.join(root,'firmware/stackchan-mod/vendor/LICENSE-m5stack'),'utf8')+
+  '\npico face detection, in the host (firmware/host/face: picornt.c, picornt.h and the facefinder cascade; MIT)\n'+readFileSync(path.join(root,'firmware/host/face/LICENSE-pico'),'utf8')+
+  '\nesp-dl and its human_face_detect models, in the host (Espressif, MIT; fetched by the host build from the ESP component registry)\n'+readFileSync(path.join(root,'firmware/host/face/LICENSE-esp-dl'),'utf8'));
 const bytes=readFileSync(archive);
 writeFileSync(path.join(output,'build-info.json'),JSON.stringify({builtAt:new Date().toISOString(),stackchanCommit:expected,moddableVersion:'10.1.0',candidateTarget:'m5stackchan_cores3',hardwareCompatibilityVerified:false,flashed:false,bytes:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex')},null,2)+'\n');
 console.log('Build complete. No device was written. Hardware and partition compatibility remain unverified.');

@@ -32,14 +32,15 @@ it('follows a face in the robot camera from the head pose of that frame, within 
   expect(r.y).toBeCloseTo(goal.y,1);expect(r.p).toBeCloseTo(goal.p,1);expect(r.p).toBeLessThan(0); // negative pitch looks up
   const still=new TargetTracker();still.enabled=true;still.aim(.52,.49,{y:0,p:0},0);expect(still.tick(100).rotation).toEqual({y:0,p:0,r:0}); // a centred face: no jitter
   const far=new TargetTracker();far.enabled=true;far.aim(0,1,{y:1.4,p:0},0);for(let i=1;i<=40;i++)far.tick(i*100);
-  expect(far.yaw).toBeCloseTo(AIM_YAW,6);expect(AIM_YAW).toBeCloseTo(Math.PI/2,9); // never past 90° to the sideexpect(far.pitch).toBeLessThanOrEqual(0);expect(far.pitch).toBeGreaterThanOrEqual(-.52);
+  expect(far.yaw).toBeCloseTo(AIM_YAW,6);expect(AIM_YAW).toBeCloseTo(Math.PI/2,9); // never past 90° to the side
+  expect(far.pitch).toBeLessThanOrEqual(0);expect(far.pitch).toBeGreaterThanOrEqual(-.52);
   expect(far.tick(1400+1600).active).toBe(false); // nobody seen for 1.5 s: holds where it is
 });
 it('keeps the mouth still without speech and follows real mouth energy',()=>{
   for(const time of [0,1000,2000,4000])expect(portraitFrame({},time)).toBe('neutral');
-  expect(portraitFrame({mouth:{open:.3}},1000)).toBe('mouth-2'); // talk-small
-  expect(portraitFrame({mouth:{open:.8}},1000)).toBe('mouth-4'); // talk-open
-  expect(portraitView({emotion:3,mouth:{open:.58}},1000)).toEqual({base:'neutral',mouth:3});
+  expect(portraitFrame({mouth:{open:.3}},1000)).toBe('mouth-3'); // just under talk-small (eight levels since 12 Nov 2026)
+  expect(portraitFrame({mouth:{open:.8}},1000)).toBe('mouth-8'); // talk-open
+  expect(portraitView({emotion:3,mouth:{open:.58}},1000)).toEqual({base:'neutral',mouth:6});
   expect(portraitFrame({mouth:{open:NaN}},1000)).toBe('neutral');
 });
 it('handles a natural blink and emotions without autonomous lip motion',()=>{
@@ -53,7 +54,7 @@ it('temporarily smiles at touch while preserving speech and the latest base expr
   expect(reaction.accept('head',{gesture:'forwardSwipe'},1000)).toBe(true);
   const talking={emotion:2,mouth:{open:.8}};
   expect(reaction.apply(talking,1100).emotion).toBe(3);
-  expect(portraitFrame(reaction.apply(talking,1100),1000)).toBe('mouth-4');
+  expect(portraitFrame(reaction.apply(talking,1100),1000)).toBe('mouth-8');
   expect(talking.emotion).toBe(2);
   const latest={emotion:1};expect(reaction.apply(latest,4100)).toBe(latest);
 });

@@ -10,7 +10,7 @@ import {pairingEvent} from 'robottino-live-wire';
 // keep-alive every 20 s, which the server ignores. hooks.diag records each step (TEMPORARY, nvs pairDiag).
 const KEEPALIVE_MS=20000;
 export function createPairing(robot,hooks){
-  let socket,timer,keepalive,code,closed=true;
+  let socket,timer,keepalive,code,closed=true,stored=false,savedOk=false; // stored: the credential has come
   const stop=reason=>{
     if(closed)return;closed=true;hooks.diag?.('end:'+reason);
     if(timer!==undefined)Timer.clear(timer);timer=undefined;if(keepalive!==undefined)Timer.clear(keepalive);keepalive=undefined;code=undefined;
@@ -19,10 +19,12 @@ export function createPairing(robot,hooks){
   };
   async function start(){
     if(!closed)return false;
-    closed=false;hooks.diag?.('start');
+    closed=false;stored=savedOk=false;hooks.diag?.('start');
     try{await robot.connectivity.network?.ready;}catch{stop('network');return false;}
     if(closed)return false;
-    socket=new Client({host:'robottino-stackchan.example.workers.dev',port:443,path:'/api/robot/pair'});
+    // A socket that cannot even be made ends the pairing, or it would stay «active» for ever (code review, 19 Nov 2026).
+    try{socket=new Client({host:'robottino-stackchan.example.workers.dev',port:443,path:'/api/robot/pair'});}
+    catch{stop('error');return false;}
     timer=Timer.set(()=>stop('expired'),330000); // the server code lasts 5 minutes
     socket.callback=(type,value)=>{
       if(closed)return;
@@ -36,13 +38,15 @@ export function createPairing(robot,hooks){
           }
           if(event.type!=='credential'){stop('error');return;}
           hooks.diag?.('cred');
-          let ok=false;
+          let ok=false;stored=true;
           try{Preference.set('robottino','deviceToken',event.token);ok=Preference.get('robottino','deviceToken')===event.token;}catch{}
-          hooks.diag?.(ok?'stored':'notstored');socket.write(JSON.stringify({type:'stored',ok}));
+          hooks.diag?.(ok?'stored':'notstored');socket.write(JSON.stringify({type:'stored',ok}));savedOk=ok;
           // Let the confirmation leave before closing.
           if(timer!==undefined)Timer.clear(timer);timer=Timer.set(()=>stop(ok?'paired':'store_failed'),500);
         }else if(type===Client.handshake)hooks.diag?.('open');
-        else if(type===Client.disconnect)stop('closed');
+        // The server closes as soon as it has the confirmation (src/pairing.ts): after the token, that is the end of a
+        // pairing that worked, not an interruption (code review, 19 Nov 2026).
+        else if(type===Client.disconnect)stop(stored?(savedOk?'paired':'store_failed'):'closed');
       }catch{stop('error');}
     };
     return true;

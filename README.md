@@ -41,6 +41,8 @@ It is three parts that only ever talk through the cloud service, so no computer 
   | “back to happy”, “be happy again” | smiles, then back to its usual self |
   | “back to normal”, “calm down”, “stop being angry” | back to its usual self at once |
 
+  If the request is worded differently and Robottino's voice turns angry or sad all the same, the face follows what it says («Grrr, adesso sono proprio arrabbiata!»).
+
 - **“What is this?”** Hold an object in front of the robot and ask “what is this?”, “what do you see?” or “what am I holding?”. It takes one 160×120 picture with its camera, sends it over the voice connection, and a vision model describes it in one sentence that the robot says. It never guesses: no picture, no answer.
 
   Every command also works in Italian (see `firmware/stackchan-mod/voice-wire.js` for the exact phrases in both languages).
@@ -66,6 +68,11 @@ To build it: open `ios/Robottino.xcodeproj`, set your own bundle identifier and 
 
 - M5Stack **StackChan K151** (CoreS3, ESP32-S3 rev 0.2, 16 MB flash, two serial servos, GC0308 camera, Si12T head touch sensor).
 - An iPhone for the app (optional for conversation, needed for the live link and pairing).
+- Optional, on the Grove ports (supported in the code, several parts not yet tried on real hardware): the M5Stack RoverC Pro and a VL53L0X distance sensor on Port A through a plain Grove hub, an ENV III unit, a PIR motion sensor on Port B, a K210 UnitV camera on Port C. For now every sensor sits on the head, so the distance sensor looks where the head looks.
+
+![Robottino with all its sensors attached to the head](docs/media/robot-sensors.jpg)
+
+*The K151 with the extra sensors attached to its head; on the screen, one of the faces you can choose from the app.*
 
 A CoreS3 build alone does not prove K151 compatibility: servo limits, calibration and the head sensor were all tuned on the real robot.
 

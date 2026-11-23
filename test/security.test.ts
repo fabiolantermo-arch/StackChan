@@ -24,3 +24,15 @@ it('enforces one quota across sessions',async()=>{
   for(let i=0;i<6;i++)expect(await quota.consume()).toBe(true);
   expect(await quota.consume()).toBe(false);
 });
+
+// External review of 17 Nov 2026, R5: the app's credential asked for sessionId=robot and entered the robot's own call.
+it('the app credential never enters the robot\'s own voice session; the device credential never opens the app route',async()=>{
+  const app='a'.repeat(64),device='d'.repeat(64),bindings={...env,ROBOT_API_TOKEN:app,ROBOT_DEVICE_TOKEN:device};
+  const ask=(path:string,token:string)=>worker.fetch(new Request('https://test'+path,{headers:{authorization:'Bearer '+token,upgrade:'websocket'}}),bindings);
+  for(const session of ['robot','Robot','ROBOT'])for(const provider of ['elevenlabs','openai']){
+    const refused=await ask(`/api/voice?provider=${provider}&sessionId=${session}&tools=1`,app);
+    expect(refused.status).toBe(403);expect(await refused.json()).toEqual({error:'reserved_session'});
+  }
+  expect((await ask('/api/voice?provider=elevenlabs&sessionId=robot',device)).status).toBe(401);
+  expect((await ask('/api/robot/voice',app)).status).toBe(401);
+});

@@ -1,5 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
+import * as wire from './live-wire.js';
 import {DeviceCommands,encodeMedia,decodeMedia,screenPixels,audiblePCM,pcmMouthLevel,cameraChunks,greyChunks,windowChunks,SMALL_PIECES,CALL_PIECE,CALL_PIECE_MAX,CallPacker,encodeCallAudio,callAudioLength,decodeCallAudio} from './live-wire.js';
 function fixture(overrides={}){
   const events=[],acks=[];const io=Object.fromEntries(['camera','call','screen','motion','face','dance','stop','audio','image'].map(name=>[name,value=>{events.push([name,value]);}]));
@@ -10,6 +11,57 @@ test('live dispatcher starts and stops camera, call and screen only on commands'
   for(const action of ['camera.start','camera.stop','call.start','call.stop','screen.start','screen.stop'])await h.device.command({id:action,action});
   assert.deepEqual(h.events.map(([name,value])=>[name,value]),[['camera',true],['camera',false],['call',true],['call',false],['screen',true],['screen',false]]);
   assert.equal(h.acks.length,6);assert.ok(h.acks.every(ack=>ack.ok));
+});
+test('live rover keys: the robot\'s own directions and a short move, nothing else',async()=>{
+  const h=fixture({rover:(move,ms)=>h.events.push(['rover',move,ms])});
+  await h.device.command({id:'r1',action:'rover',move:'forward',ms:500});
+  await h.device.command({id:'r2',action:'rover',move:'turnLeft',ms:5000});
+  await h.device.command({id:'r3',action:'rover',move:'jump',ms:500});
+  await h.device.command({id:'r4',action:'rover',move:'stop',ms:200});
+  await h.device.command({id:'r6',action:'rover',move:'gripOpen',ms:200});await h.device.command({id:'r7',action:'rover',move:'gripClose',ms:200});await h.device.command({id:'r8',action:'rover',move:'gripHalf',ms:200});
+  assert.deepEqual(h.events,[['rover','forward',500],['rover','stop',200],['rover','gripOpen',200],['rover','gripClose',200],['rover','gripHalf',200]]);
+  assert.deepEqual(h.acks.map(a=>a.ok),[true,false,false,true,true,true,true]);
+  // Hand gestures (15 Nov 2026): by name, nothing else; not done, not acknowledged.
+  const g=fixture({gesture:name=>{if(name==='wave')throw Error('gesture_unavailable');g.events.push(['gesture',name]);}});
+  for(const [id,name] of [['g1','thumbsUp'],['g2','fist'],['g3','wave'],['g4','palm']])await g.device.command({id,action:'gesture',name});
+  assert.deepEqual(g.events,[['gesture','thumbsUp'],['gesture','palm']]);assert.deepEqual(g.acks.map(a=>a.ok),[true,false,false,true]);
+  // Where the iPhone sees the hand that leads the Force (23 Nov 2026): 0…1 only; refused when the Force follows nothing.
+  const hd=fixture({hand:x=>{if(x===.9)throw Error('not_following');hd.events.push(['hand',x]);}});
+  for(const [id,x] of [['h1',.3],['h2',-.1],['h3','0.5'],['h4',.9],['h5',1]])await hd.device.command({id,action:'hand',x});
+  assert.deepEqual(hd.events,[['hand',.3],['hand',1]]);assert.deepEqual(hd.acks.map(a=>a.ok),[true,false,false,false,true]);
+  // «Esplora» of the Studio (23 Nov 2026): on or off only; a robot that cannot start it says so.
+  const ex=fixture({explore:on=>{if(on==='no')throw Error('explore_unavailable');ex.events.push(['explore',on]);}});
+  for(const [id,on] of [['e1',true],['e2','yes'],['e3',false],['e4',undefined]])await ex.device.command({id,action:'explore',on});
+  assert.deepEqual(ex.events,[['explore',true],['explore',false]]);assert.deepEqual(ex.acks.map(a=>a.ok),[true,false,true,false]);
+  // What else the iPhone saw (15 Nov 2026): the kind, and plain words only where they belong.
+  const s=fixture({sight:(kind,text)=>s.events.push(['sight',kind,text])});
+  for(const [id,extra] of [['s1',{kind:'person',text:'Ada'}],['s2',{kind:'object',text:"un'arancia"}],['s3',{kind:'smile'}],['s4',{kind:'person'}],['s5',{kind:'smile',text:'x'}],['s6',{kind:'object',text:'<b>'}],['s7',{kind:'wink'}]])await s.device.command({id,action:'sight',...extra});
+  assert.deepEqual(s.events,[['sight','person','Ada'],['sight','object',"un'arancia"],['sight','smile',undefined]]);assert.deepEqual(s.acks.map(a=>a.ok),[true,true,true,false,false,false,false]);
+  const refused=fixture({rover:()=>{throw Error('rover_unavailable');}});await refused.device.command({id:'r5',action:'rover',move:'back',ms:500});
+  assert.equal(refused.acks[0].ok,false,'not done: not acknowledged');
+});
+test('live volume: levels 1…10 only, 10 is 252 and nothing goes above it (15 Nov 2026)',async()=>{
+  const h=fixture({volume:level=>h.events.push(['volume',level])});
+  for(const [id,level] of [['v1',1],['v2',10],['v3',0],['v4',11],['v5',7.5],['v6','5']])await h.device.command({id,action:'volume',level});
+  assert.deepEqual(h.events,[['volume',1],['volume',10]]);assert.deepEqual(h.acks.map(a=>a.ok),[true,true,false,false,false,false]);
+  assert.equal(wire.volumeAmp(wire.VOLUME.max),252);assert.equal(wire.volumeAmp(wire.VOLUME.default),246);assert.equal(wire.volumeAmp(wire.VOLUME.min),198);
+  const refused=fixture({volume:()=>{throw Error('volume_unavailable');}});await refused.device.command({id:'v7',action:'volume',level:5});
+  assert.equal(refused.acks[0].ok,false,'not done: not acknowledged');
+});
+test('live motions switch: on or off only (15 Nov 2026)',async()=>{
+  const h=fixture({motions:on=>h.events.push(['motions',on])});
+  for(const [id,on] of [['m1',false],['m2',true],['m3','no'],['m4',undefined]])await h.device.command({id,action:'motions',on});
+  assert.deepEqual(h.events,[['motions',false],['motions',true]]);assert.deepEqual(h.acks.map(a=>a.ok),[true,true,false,false]);
+});
+test('live «Chiamata con lo sguardo» switch: on or off only (21 Nov 2026)',async()=>{
+  const h=fixture({gazeCall:on=>h.events.push(['gaze',on])});
+  for(const [id,on] of [['g1',true],['g2',false],['g3','yes']])await h.device.command({id,action:'gazeCall',on});
+  assert.deepEqual(h.events,[['gaze',true],['gaze',false]]);assert.deepEqual(h.acks.map(a=>a.ok),[true,true,false]);
+});
+test('live rover follow switch: on or off only (15 Nov 2026)',async()=>{
+  const h=fixture({roverFollow:on=>h.events.push(['follow',on])});
+  for(const [id,on] of [['f1',true],['f2',false],['f3',1]])await h.device.command({id,action:'roverFollow',on});
+  assert.deepEqual(h.events,[['follow',true],['follow',false]]);assert.deepEqual(h.acks.map(a=>a.ok),[true,true,false]);
 });
 test('live dispatcher bounds physical poses and mirrors numeric face without video',async()=>{
   const h=fixture();await h.device.command({id:'a',action:'mirror',yaw:2,pitch:-3,leftEye:.2,rightEye:.8,mouth:.5,followHead:true});
@@ -70,6 +122,7 @@ test('face style accepts only the two supported options',async()=>{
   const h=fixture({faceStyle:value=>h.events.push(['style',value])});
   await h.device.command({id:'style',action:'face.style',style:'white'});assert.equal(h.acks.at(-1).ok,true);
   await h.device.command({id:'style2',action:'face.style',style:'redhead'});assert.equal(h.acks.at(-1).ok,true);
+  await h.device.command({id:'style3',action:'face.style',style:'curly'});assert.equal(h.acks.at(-1).ok,true,'the curly redhead (23 Nov 2026)');
   await h.device.command({id:'invalid',action:'face.style',style:'other'});assert.equal(h.acks.at(-1).ok,false);
 });
 
@@ -229,4 +282,44 @@ test('call audio: the message is a type-3 one with the marker; anything else is 
   assert.equal(callAudioLength(callPayload(new Uint8Array(CALL_PIECE_MAX+2))),0,'at most 0.2 s a piece');
   assert.equal(callAudioLength(Uint8Array.of(0xB1,0x09,0xFF,0xFF).buffer),0);assert.equal(callAudioLength(Uint8Array.of(0xB0,0x08,0xFF,0xFF).buffer),0);
   assert.equal(callAudioLength(new ArrayBuffer(0)),0);
+});
+
+test('a JPEG picture is one message: the header is written in the room the encoder left, nothing is copied (14 Nov 2026)',()=>{
+  const jpeg=bytes=>{const out=new ArrayBuffer(wire.JPEG_HEAD+bytes),body=new Uint8Array(out,wire.JPEG_HEAD);body[0]=0xff;body[1]=0xd8;body[bytes-2]=0xff;body[bytes-1]=0xd9;return out;};
+  const buffer=jpeg(5000),frame=wire.jpegFrame(buffer,7,160,120),view=new DataView(frame);
+  assert.equal(frame,buffer,'the same memory');assert.equal(frame.byteLength,12+5000);
+  assert.deepEqual([view.getUint16(0),view.getUint8(2),view.getUint8(3),view.getUint32(4),view.getUint16(8),view.getUint16(10)],[0x5242,1,8,7,160,120]);
+  assert.equal(view.getUint16(12),0xffd8,'the JPEG follows the 12 bytes');
+  assert.throws(()=>wire.jpegFrame(new ArrayBuffer(wire.JPEG_HEAD+5000),1,160,120),/invalid_camera_frame/,'not a JPEG');
+  assert.throws(()=>wire.jpegFrame(jpeg(wire.JPEG_MAX+1),1,160,120),/invalid_camera_frame/,'too large for the server');
+  assert.throws(()=>wire.jpegFrame(jpeg(wire.JPEG_MIN-1),1,160,120),/invalid_camera_frame/);
+  assert.throws(()=>wire.jpegFrame(jpeg(5000),0,160,120),/invalid_camera_frame/);
+  assert.throws(()=>wire.jpegFrame(jpeg(5000),1,321,240),/invalid_camera_frame/);
+  assert.doesNotThrow(()=>wire.jpegFrame(jpeg(wire.JPEG_MAX),1,320,240));
+});
+test('the quality of the next JPEG follows the size of the last: down when it would not leave in one go, up when there is room',()=>{
+  const {jpegQuality:q,JPEG_QUALITY,JPEG_QUALITY_MIN,JPEG_QUALITY_MAX,JPEG_SMALL,JPEG_LARGE}=wire;
+  assert.equal(q(JPEG_QUALITY,5500),JPEG_QUALITY,'a picture of the right size: nothing changes');
+  assert.equal(q(65,JPEG_LARGE+1),60);assert.equal(q(65,11000),50,'far too large: down at once');
+  assert.equal(q(65,JPEG_SMALL-1),70);
+  assert.equal(q(JPEG_QUALITY_MIN,20000),JPEG_QUALITY_MIN);assert.equal(q(JPEG_QUALITY_MAX,1000),JPEG_QUALITY_MAX);
+  // A scene that always gives large pictures ends at the lowest quality, one that gives small ones at the highest.
+  let quality=JPEG_QUALITY;for(let i=0;i<20;i++)quality=q(quality,9000);assert.equal(quality,JPEG_QUALITY_MIN);
+  for(let i=0;i<20;i++)quality=q(quality,2000);assert.equal(quality,JPEG_QUALITY_MAX);
+  assert.ok(JPEG_LARGE<8000,'a picture that keeps its quality fits in the room it waits for (live-device.js JPEG_ROOM)');
+});
+test('camera.start says whether the iPhone can show JPEG pictures; anything but true is no',async()=>{
+  const asked=[],commands=new wire.DeviceCommands({camera:async(...args)=>asked.push(args),stop(){}},()=>{});
+  await commands.command({id:'a',action:'camera.start'});await commands.command({id:'b',action:'camera.start',jpeg:true});await commands.command({id:'c',action:'camera.start',jpeg:'yes'});await commands.command({id:'d',action:'camera.stop',jpeg:true});
+  assert.deepEqual(asked,[[true,false],[true,true],[true,false],[false]]);
+});
+
+test('exploration stop passes a busy camera without cancelling its acknowledgement',async()=>{
+  let finish;
+  const h=fixture({camera:()=>new Promise(resolve=>{finish=resolve;}),explore:on=>{assert.equal(on,false);}});
+  const camera=h.device.command({id:'camera',action:'camera.start'});
+  await h.device.command({id:'end-explore',action:'explore',on:false});
+  assert.deepEqual(h.acks,[{type:'ack',id:'end-explore',ok:true}]);
+  finish();await camera;
+  assert.deepEqual(h.acks.at(-1),{type:'ack',id:'camera',ok:true});
 });

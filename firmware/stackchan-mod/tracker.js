@@ -10,8 +10,8 @@ export const FOLLOW_YAW=.8,FOLLOW_UP=.52;
 // Following with the robot's own camera may turn the head as far as any command (calibration.js HEAD_LIMITS):
 // 90° sideways and 85° up (owner, 9 Nov 2026). Every pose is limited again by the calibration.
 export const AIM_YAW=Math.PI/2,AIM_UP=85*Math.PI/180;
-// One head speed for everything (calibration.js HEAD_SPEED): 3 rad/s, about 170° a second.
-export const FOLLOW_SPEED=3;
+// One head speed for everything (calibration.js HEAD_SPEED): 6 rad/s, about 340° a second.
+export const FOLLOW_SPEED=6;
 /**
  * Following with the robot's own camera (Live «Segui il mio viso», 9 Nov 2026). The camera turns with the
  * head, and the iPhone's answer arrives late (network and analysis, about half a second). So the robot keeps
@@ -32,11 +32,18 @@ export class TargetTracker {
     if(this.target&&now-this.target.time<1000&&box.id!==this.target.id)return false;
     this.sequence=box.sequence;this.target={...box,time:now};return true;
   }
-  aim(x,y,pose,now=Date.now()){
+  aim(x,y,pose,now=Date.now(),gain=AIM_GAIN){
     if(!Number.isFinite(now)||![x,y].every(v=>Number.isFinite(v)&&v>=0&&v<=1)||!pose||![pose.y,pose.p].every(Number.isFinite))return false;
     if(this.target&&now<this.target.time)return false;
-    const yaw=clamp(pose.y+(.5-x)*CAMERA_FOV.x*AIM_GAIN,-AIM_YAW,AIM_YAW),pitch=clamp(pose.p-(.5-y)*CAMERA_FOV.y*AIM_GAIN,-AIM_UP,0);
+    if(!(gain>0&&gain<=1))return false;
+    const yaw=clamp(pose.y+(.5-x)*CAMERA_FOV.x*gain,-AIM_YAW,AIM_YAW),pitch=clamp(pose.p-(.5-y)*CAMERA_FOV.y*gain,-AIM_UP,0);
     this.target={aim:true,x,y,yaw,pitch,time:now};return true;
+  }
+  // The head to a pose of its own choosing (following alone: back to where a face was last seen), within the same limits.
+  lookAt(yaw,pitch,now=Date.now()){
+    if(![now,yaw,pitch].every(Number.isFinite))return false;
+    if(this.target&&now<this.target.time)return false;
+    this.target={aim:true,x:.5,y:.5,yaw:clamp(yaw,-AIM_YAW,AIM_YAW),pitch:clamp(pitch,-AIM_UP,0),time:now};return true;
   }
   tick(now=Date.now()){
     if(!Number.isFinite(now)||(this.lastTick!==undefined&&now<this.lastTick)){this.stop();return {active:false,gazeX:0,gazeY:0};}

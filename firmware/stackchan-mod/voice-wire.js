@@ -19,12 +19,62 @@ export function parseVoiceEvent(text,decode){
     case 'session.input_transcript.delta':return typeof value.delta==='string'?{type:'user',text:value.delta,final:false}:{type:'ignore'};
     case 'user_transcript':{const text=value.user_transcription_event?.user_transcript;return typeof text==='string'?{type:'user',text,final:true}:{type:'ignore'};}
     case 'session.output_transcript.delta':return typeof value.delta==='string'?{type:'assistant',text:value.delta}:{type:'ignore'};
-    case 'agent_response':{const text=value.agent_response_event?.agent_response;return typeof text==='string'?{type:'assistant',text}:{type:'ignore'};}
+    // robot_mood: the face asked for by the reply's voice tag ([laughs], [sighs]…; src/robot-tools.ts tagMood).
+    case 'agent_response':{const text=value.agent_response_event?.agent_response;if(typeof text!=='string')return {type:'ignore'};return TAG_MOODS.includes(value.robot_mood)?{type:'assistant',text,mood:value.robot_mood}:{type:'assistant',text};}
     case 'ping':return {type:'pong',id:Number(value.ping_event?.event_id)||0};
+    // The server is searching the web for the answer, or has finished (src/voice-stream.ts): the head lights only.
+    case 'robot.search':return {type:'search',active:value.active===true};
+    // The agent's tools (src/robot-tools.ts): only the known fields, checked again here.
+    case 'robot.tools':return {type:'tools',notice:value.notice===true,room:value.room===true};
+    case 'robot.tool':{const command=toolCommand(value);return command?{type:'tool',id:value.id,command}:{type:'ignore'};}
     case 'memory.result':return value.error==='invalid_command'?{type:'ignore'}:{type:'memory',ok:!value.error&&!value.result?.error,confirmation:typeof value.result?.confirmation==='string'};
     case 'error':case 'session.error':return {type:'error'};
     default:return {type:'ignore'};
   }
+}
+const TAG_MOODS=['happy','sad','angry'];
+const TOOL_HEAD=['right','left','up','down','center','shake','nod'],TOOL_FACE=['happy','sad','angry','normal'],TOOL_ROVER=['forward','back','left','right','turnLeft','turnRight','stop','gripOpen','gripHalf','gripClose'],TOOL_ROVER_NOW=['stop','gripOpen','gripHalf','gripClose'];
+export const REMINDER_TEXT=60;
+function toolCommand(value){
+  if(!Number.isInteger(value.id)||value.id<1||value.id>1e6)return null;
+  const text=(raw,max)=>typeof raw==='string'?raw.replace(/[\u0000-\u001f]/g,' ').trim().slice(0,max):'';
+  switch(value.tool){
+    case 'head':return TOOL_HEAD.includes(value.direction)?{tool:'head',direction:value.direction,full:value.full===true}:null;
+    case 'face':return TOOL_FACE.includes(value.expression)?{tool:'face',expression:value.expression}:null;
+    case 'dance':return {tool:'dance'};
+    case 'see':return {tool:'see'};
+    // The rover (src/robot-tools.ts muovi_rover): the robot's own directions, 300–3000 ms, or stop.
+    case 'rover':return TOOL_ROVER.includes(value.move)&&(TOOL_ROVER_NOW.includes(value.move)||Number.isInteger(value.ms)&&value.ms>=300&&value.ms<=3000)?{tool:'rover',move:value.move,ms:TOOL_ROVER_NOW.includes(value.move)?0:value.ms}:null;
+    case 'timer':
+      if(value.action==='cancel'||value.action==='status')return {tool:'timer',action:value.action};
+      return value.action==='set'&&Number.isInteger(value.seconds)&&value.seconds>=10&&value.seconds<=21600?{tool:'timer',action:'set',seconds:value.seconds,label:text(value.label,40)}:null;
+    case 'reminder':{
+      if(!Number.isFinite(value.at)||value.at<Date.UTC(2025,0,1))return null;
+      if(value.action==='cancel')return {tool:'reminder',action:'cancel',at:value.at};
+      const words=text(value.text,REMINDER_TEXT);
+      return value.action==='add'&&words?{tool:'reminder',action:'add',at:value.at,text:words}:null;
+    }
+    default:return null;
+  }
+}
+// The robot's answer to a tool: whether it did it, why not (a fixed code), for timers the line it shows.
+export function toolResultMessage(id,result){
+  const out={type:'robot.tool.result',id,ok:result?.ok===true};
+  if(typeof result?.code==='string')out.code=result.code.slice(0,20);
+  if(typeof result?.text==='string'&&result.text)out.text=result.text.slice(0,160);
+  return JSON.stringify(out);
+}
+// A timer or reminder that ends during a call (owner, 14 Nov 2026: «il timer non suona alla fine»: the speaker belongs to
+// the call, so the robot's own sound cannot play): the agent says it.
+export function noticeMessage(text){return JSON.stringify({type:'robot.notice',text:String(text).slice(0,100)});}
+// The robot's saved clock-time reminders, sent as the call opens (for the greeting and «che promemoria ho?»).
+// The room as the ENV III reads it (°C, %, Pa), sent as the call opens to a Worker that takes it (robot.tools room).
+export function roomMessage(value){
+  if(!value||!Number.isFinite(value.t)||!Number.isFinite(value.h))return null;
+  return JSON.stringify({type:'robot.room',t:Math.round(value.t*10)/10,h:Math.round(value.h),...(Number.isFinite(value.p)?{p:Math.round(value.p)}:{})});
+}
+export function agendaMessage(items){
+  return JSON.stringify({type:'robot.agenda',items:(Array.isArray(items)?items:[]).slice(0,8).map(item=>({at:item.at,text:String(item.text).slice(0,REMINDER_TEXT)}))});
 }
 function audio(base64,decode){
   if(typeof base64!=='string'||!base64)return {type:'ignore'};
@@ -200,7 +250,10 @@ export function replyMood(text){
 export const GESTURES={
   nod:[{yaw:0,pitch:-6,durationMs:300},{yaw:0,pitch:-1,durationMs:300},{yaw:0,pitch:-4,durationMs:300},{yaw:0,pitch:0,durationMs:300}],
   shake:[{yaw:7,pitch:0,durationMs:300},{yaw:-7,pitch:0,durationMs:300},{yaw:5,pitch:0,durationMs:300},{yaw:0,pitch:0,durationMs:300}],
-  tilt:[{yaw:6,pitch:-4,durationMs:900},{yaw:0,pitch:0,durationMs:400}]
+  tilt:[{yaw:6,pitch:-4,durationMs:900},{yaw:0,pitch:0,durationMs:400}],
+  // «balla» of the agent's tool (14 Nov 2026): a little dance within the dances' ±10°, about 3 s.
+  dance:[{yaw:10,pitch:-6,durationMs:350},{yaw:-10,pitch:0,durationMs:350},{yaw:10,pitch:-6,durationMs:350},{yaw:-10,pitch:0,durationMs:350},
+    {yaw:0,pitch:-8,durationMs:300},{yaw:0,pitch:0,durationMs:300},{yaw:6,pitch:-4,durationMs:350},{yaw:-6,pitch:-4,durationMs:350},{yaw:0,pitch:0,durationMs:350}]
 };
 
 // Spoken head commands (owner, 11 Nov 2026): «muovi la testa», «guarda a destra», «muoviti a sinistra», «alza la
@@ -263,7 +316,12 @@ function seeCommandIt(text){
 }
 // Robottino says it is about to look («Fammi vedere…», the server's SEE_RULE) although the user's words gave no
 // command here (the question was written badly by the recognizer): the robot takes the picture all the same.
-const replySeeIt=text=>/\bfammi (?:vedere|guardare|dare un'occhiata)\b|\b(?:guardo|controllo) subito\b|\bdo un'occhiata\b/u.test(String(text).toLowerCase().replace(/[’`]/g,"'"));
+// Only when that is the whole reply, with at most the thing shown after it («Fammi vedere cos'è»). Owner, 13 Nov 2026:
+// «gli sto chiedendo il meteo per domani e mi dice vedo un ambiente interno»: the agent had answered «Fammi vedere...
+// Aspetta un attimo, controllo subito il meteo per Roma.», then «Controllo subito le previsioni meteo…», each took a
+// picture and the weather never came. «Controllo subito» is said for a search, never for looking: not among them.
+const replyWords=text=>String(text).toLowerCase().replace(/[’`]/g,"'").replace(/[.!?,;:…]+/gu,' ').replace(/\s+/gu,' ').trim();
+const replySeeIt=text=>/^(?:ok |okay |va bene |certo |allora |sì |si |aspetta |un attimo )*(?:fammi (?:vedere|guardare|dare un'occhiata)|(?:ora |adesso )?(?:guardo|do un'occhiata)(?: subito)?)(?: (?:un attimo|un secondo|un momento|subito|bene|meglio|(?:che )?cos'è|(?:che )?cosa (?:è|hai|tieni|c'è|mi (?:stai )?mostr\S*)(?: \S+){0,3}|(?:quest|quell)\S*(?: oggetto)?|l'oggetto))*$/u.test(replyWords(text));
 
 // Spoken face commands (owner, 11 Nov 2026): «sorridi», «fai la faccia triste», «fai la faccia arrabbiata». The face
 // changes; the smile goes back to normal after 5 s, the sad and angry faces stay until told (mod.js). Short sentences only.
@@ -274,11 +332,14 @@ function faceCommandIt(text){
   // felice» smiles and then is serene; «torna normale», «basta», «non essere più triste» go straight to serene.
   if(/\b(?:torna(?:re)? (?:a essere |ad essere )?(?:felice|contenta|contento|allegra|allegro|a sorridere)|di nuovo (?:felice|contenta|allegra))\b/u.test(value))return {expression:'happy'};
   if(/\b(?:torna(?:re)? (?:normale|serena|sereno|tranquilla|tranquillo|calma|calmo|come prima)|faccia (?:normale|serena)|calmati|non (?:essere|fare) (?:più |piu )?(?:(?:la |il )?(?:faccia )?)?(?:triste|a?rr?abb?iat[oa])|basta (?:essere |fare )?(?:(?:la |il )?(?:faccia )?)?(?:triste|a?rr?abb?iat[oa]|cos[iì]))\b/u.test(value))return {expression:'normal'};
+  // «Basta» alone is one of the ways back the server's HEAD_RULE gives the voice: the face goes back with it.
+  if(value.split(' ').length<=3&&/\bbasta\b/u.test(value))return {expression:'normal'};
   if(/(?:^|\s)non\s/u.test(value))return null;
   if(/\b(?:sorridi|sorridimi|sorridere|fai un sorriso|fammi un sorriso|faccia (?:felice|contenta|sorridente|allegra)|sii (?:felice|contento|contenta))\b/u.test(value))return {expression:'happy'};
-  if(/\b(?:faccia (?:triste|dispiaciuta)|sii triste|fai (?:il|la) triste)\b/u.test(value))return {expression:'sad'};
+  // «Fai la voce arrabbiata.» (11 Nov 2026, 18:17) changed the voice and not the face: the voice asks for the face too.
+  if(/\b(?:(?:faccia|voce|espressione) (?:triste|dispiaciuta)|sii triste|fai (?:il|la) triste)\b/u.test(value))return {expression:'sad'};
   // The recognizer also writes «arrabiata» or drops the first syllable («Rabbiata.», 11 Nov 2026).
-  if(/\b(?:faccia (?:a?rr?abb?iat[oa]|cattiva)|arr?abb?iati|sii a?rr?abb?iat[oa])\b/u.test(value))return {expression:'angry'};
+  if(/\b(?:(?:faccia|voce|espressione) (?:a?rr?abb?iat[oa]|cattiva)|arr?abb?iati|sii a?rr?abb?iat[oa])\b/u.test(value))return {expression:'angry'};
   // In a very short sentence the feeling alone is enough (11 Nov 2026: «Fai la faccia triste» came as «C'è triste.»).
   if(value.split(' ').length<=3){if(/\btrist[ei]\b/u.test(value))return {expression:'sad'};if(/\b(?:a?rr?abb?iat[oaie]|rabbia)\b/u.test(value))return {expression:'angry'};}
   return null;
@@ -340,8 +401,8 @@ function faceCommandEn(text){
   if(/\b(?:back to normal|normal face|normal again|calm down|relax|(?:stop|quit) (?:being |looking )?(?:sad|angry|mad)|(?:don't|do not) (?:be|look) (?:so )?(?:sad|angry|mad)(?: any ?more)?|no more (?:sad|angry) face|enough)\b/u.test(value))return {expression:'normal'};
   if(EN_NOT.test(value))return null;
   if(/\b(?:smile|give me a smile|happy face|be happy|look happy)\b/u.test(value))return {expression:'happy'};
-  if(/\b(?:sad face|be sad|look sad|make a sad)\b/u.test(value))return {expression:'sad'};
-  if(/\b(?:(?:angry|mad|grumpy) face|be angry|get angry|get mad|look angry|make an angry)\b/u.test(value))return {expression:'angry'};
+  if(/\b(?:sad (?:face|voice)|be sad|look sad|make a sad)\b/u.test(value))return {expression:'sad'};
+  if(/\b(?:(?:angry|mad|grumpy) (?:face|voice)|be angry|get angry|get mad|look angry|make an angry)\b/u.test(value))return {expression:'angry'};
   if(count<=3){if(/\bsad\b/u.test(value))return {expression:'sad'};if(/\b(?:angry|mad)\b/u.test(value))return {expression:'angry'};}
   return null;
 }
@@ -360,9 +421,82 @@ function replyHeadCommandEn(text){
   if(/\b(?:lowered|lowering) my head\b|\blook(?:ing|ed) down\b/u.test(value))return {direction:'down'};
   return null;
 }
+// The feeling Robottino says it has at the start of its reply (owner, 12 Nov 2026: «la voce è arrabbiata ma il viso
+// rimane normale»). The agent takes many sentences as a request for a face («Fai la voce arrabbiata», «You are sad
+// now», or it gets angry by itself) that are not face commands here: then its voice changed and the face did not.
+// The lines are the ones the server's HEAD_RULE gives it («Grrr, adesso sono proprio arrabbiata!», «Oh no… che
+// tristezza.»). Only the opening counts, never what it says it is not. Angry has its own sound («Grrr») and may be
+// followed by more words; the sad line must be the whole short reply, because a kind answer to bad news starts the
+// same way and must not leave the sad face on (the reply's own mood already shows it while it is said).
+const REPLY_OPENING=90,REPLY_SHORT=8;
+const replyOpening=text=>String(text).toLowerCase().replace(/[’`]/g,"'").replace(/\s+/gu,' ').trim();
+function replyFaceCommandIt(text){
+  const whole=replyOpening(text),value=whole.slice(0,REPLY_OPENING),short=whole.replace(/[.!?…,]+/gu,' ').trim().split(/\s+/u).length<=REPLY_SHORT;
+  if(/\b(?:sono tornat[oa]|torno|eccomi di nuovo) (?:felice|allegr[oa]|content[oa]|sorridente)\b/u.test(value))return {expression:'happy'};
+  if(/\b(?:sono tornat[oa]|torno) (?:normale|seren[oa]|tranquill[oa]|calm[oa]|come prima)\b|\bmi sono calmat[oa]\b|\bnon sono (?:più|piu) (?:triste|arrabbiat[oa])\b/u.test(value))return {expression:'normal'};
+  if(/\bnon (?:sono|sto|mi sento)\b[^.!?…]*\b(?:triste|arrabbiat[oa])\b/u.test(value))return null;
+  if(/(?:^|[^a-z])grr+(?![a-z])|\b(?:sono|mi sento) (?:[a-zàèéìòù]+ ){0,2}arrabbiat[oa]\b/u.test(value))return {expression:'angry'};
+  if(short&&/^oh no\b[^a-z]*che tristezza\b|\b(?:sono|mi sento) (?:[a-zàèéìòù]+ ){0,2}triste\b/u.test(value))return {expression:'sad'};
+  return null;
+}
+function replyFaceCommandEn(text){
+  const whole=replyOpening(text),value=whole.slice(0,REPLY_OPENING),short=whole.replace(/[.!?…,]+/gu,' ').trim().split(/\s+/u).length<=REPLY_SHORT;
+  if(/\b(?:i'm|i am|i feel) happy again\b|\bback to (?:being )?happy\b/u.test(value))return {expression:'happy'};
+  if(/\bback to normal\b|\bi(?:'ve| have) calmed down\b|\b(?:i'm|i am) (?:not|no longer) (?:sad|angry|mad) any ?more\b|\b(?:i'm|i am) no longer (?:sad|angry|mad)\b/u.test(value))return {expression:'normal'};
+  if(/\b(?:i'm|i am) not\b[^.!?…]*\b(?:sad|angry|mad)\b|\bi (?:do not|don't) feel\b[^.!?…]*\b(?:sad|angry|mad)\b/u.test(value))return null;
+  if(/(?:^|[^a-z])grr+(?![a-z])|\b(?:i'm|i am|i feel) (?:[a-z]+ ){0,2}(?:angry|mad|grumpy)\b/u.test(value))return {expression:'angry'};
+  if(short&&/^oh no\b[^a-z]*(?:(?:that is|that's|this is|it is|it's) (?:so |very |really )?sad|how sad)\b|\b(?:i'm|i am|i feel) (?:[a-z]+ ){0,2}sad\b/u.test(value))return {expression:'sad'};
+  return null;
+}
 export const headCommand=text=>headCommandIt(text)??headCommandEn(text);
+// Spoken rover commands (owner, 15 Nov 2026: «con vai indietro, avanti, destra, sinistra, si deve dare priorità al
+// rover»). Used only while the rover answers (mod.js): then these sentences move the rover and not the head. A sentence
+// about the head or the eyes («guarda a destra», «gira la testa») stays the head's; up and down are only the head's.
+// Right and left are the user's, facing the robot, as for the head: the move given back is in the robot's own
+// directions (rover-wire.js MOVES), like the agent's muovi_rover (src/robot-tools.ts ROVER). «Gira/girati/voltati»
+// turns on the spot; otherwise right and left go sideways. Short sentences only, never a negated one.
+// The words of a spoken rover move, and the small words that may stand around them (roverCommand).
+const ROVER_WORD=/^(?:vai|va|vieni|spostati|sposta|muoviti|avanza|arretra|indietreggia|torna|gira|girati|girare|voltati|volta|voltare|ruota|destr\w*|sinis\w*|avanti|indietro|retro|avvicinati|go|move|turn|come|forward|back|backward|backwards|left|right|here|closer|around)$/u;
+const ROVER_FILL=/^(?:un|po'?|poco|pochino|più|piu|a|di|verso|ancora|tutto|tutta|per|favore|ora|adesso|subito|il|rover|le|ruote|me|qui|qua|da|lato|sul|posto|e|pure|dai|the|to|little|bit|please|now)$/u;
+// A little, half way: «chiudi poco la pinza», «chiudi la pinza a metà».
+const GRIP_LITTLE=/(?:^|\s)(?:poco|po'?|pochino|metà|meta|mezzo|piano|leggermente|appena|a little|half|halfway|slightly|gently)(?:\s|$)/u;
+export function roverCommand(text){
+  const value=String(text).toLowerCase().replace(/[’`]/g,"'").replace(/^(?:ehi|ciao|ok|senti)?\s*robottino[\s,:!]*/u,'').replace(/^(?:hey|hi|ok|okay)?\s*robottino[\s,:!]*/u,'').replace(/[.!?,]+/gu,' ').replace(/\s+/gu,' ').trim();
+  if(!value||value.split(' ').length>8||/(?:^|\s)(?:non|don't|do not|not)\s/u.test(value))return null;
+  // The gripper (15 Nov 2026): «apri la pinza», «chiudi la pinza», and alone «afferra», «prendi», «molla», «rilascia».
+  if(/\b(?:pinza|gripper|claw)\b/u.test(value)){
+    if(/\b(?:apri\w*|allarga\w*|molla\w*|rilascia\w*|lascia\w*|open\w*|release\w*)\b/u.test(value))return {move:'gripOpen'};
+    if(/\b(?:chiudi\w*|stringi\w*|serra\w*|afferra\w*|prendi\w*|close\w*|grab\w*|grip)\b/u.test(value))return {move:GRIP_LITTLE.test(value)?'gripHalf':'gripClose'};
+    return null;
+  }
+  // «Chiudi poco» and «chiudi tutto» said alone (the owner's own names for the two).
+  if(/^(?:chiudi|stringi) (?:un )?(?:poco|po'?|pochino|a metà|a meta|piano|leggermente)$/u.test(value))return {move:'gripHalf'};
+  if(/^(?:chiudi|stringi) (?:tutto|del tutto|tutta|completamente|forte|bene)$/u.test(value))return {move:'gripClose'};
+  if(/^(?:afferra(?:lo|la)?|prendi(?:lo|la)?|grab(?: it)?)$/u.test(value))return {move:'gripClose'};
+  if(/^(?:molla(?:lo|la)?|rilascia(?:lo|la)?|release(?: it)?|let go)$/u.test(value))return {move:'gripOpen'};
+  if(/\b(?:testa|guard\w*|occhi|sguardo|head|look\w*|eyes)\b/u.test(value))return null;
+  if(/\b(?:alto|basso|su|giù|giu|sù|up|down)\b/u.test(value))return null;
+  if(/^(?:fermati|fermo|ferma(?: il rover| le ruote)?|stop|basta|alt|stop it|stop moving)$/u.test(value))return {move:'stop'};
+  // Only a command, not a sentence that happens to hold one of its words (code review, 15 Nov 2026: «Come stai?» sent the
+  // rover forward by the English «come», «Andiamo avanti con la storia» by «avanti», «A destra c'è la finestra» to the
+  // side). Every word must be a word of moving or a small word around it; «come» counts only as «come here».
+  if(!value.split(' ').every(word=>ROVER_WORD.test(word)||ROVER_FILL.test(word)))return null;
+  if(/\bcome\b/u.test(value)&&!/\bcome (?:here|closer|forward|to me)\b/u.test(value))return null;
+  const turn=/\b(?:gira(?:ti|re)?|volta(?:ti|re)?|ruota|turn(?: around)?)\b/u.test(value);
+  const right=/\b(?:destr\w*|right)\b/u.test(value),left=/\b(?:sinis\w*|left)\b/u.test(value);
+  if(right!==left){
+    // The user's right is the robot's left.
+    if(turn)return {move:right?'turnLeft':'turnRight'};
+    return {move:right?'left':'right'};
+  }
+  if(/\b(?:indietro|retro|arretra|indietreggia|back(?:ward)?s?)\b/u.test(value))return {move:'back'};
+  if(/\b(?:avanti|avanza|avvicinati|vieni|forward|come)\b/u.test(value))return {move:'forward'};
+  return null;
+}
 export const faceCommand=text=>faceCommandIt(text)??faceCommandEn(text);
 export const seeCommand=text=>seeCommandIt(text)||seeCommandEn(text);
 export const replyHeadCommand=text=>replyHeadCommandIt(text)??replyHeadCommandEn(text);
+export const replyFaceCommand=text=>replyFaceCommandIt(text)??replyFaceCommandEn(text);
 // «Let me check…» is not among them: the agent says it for anything («Let me check the connection», 11 Nov 2026).
-export const replySee=text=>replySeeIt(text)||/\blet me (?:see|look|take a look|have a look)\b|\bi'll take a look\b/u.test(String(text).toLowerCase().replace(/[’`]/g,"'"));
+// The whole reply here too: «Let me see what the weather is like tomorrow» is a search, not a look (13 Nov 2026).
+export const replySee=text=>replySeeIt(text)||/^(?:ok |okay |sure |all right |alright |hold on |one moment )*(?:let me (?:see|look|take a look|have a look)|i'll (?:take|have) a look)(?: (?:closer|for a (?:moment|second)|at (?:it|this|that)(?: (?:object|thing))?|what (?:it|this|that) is|what you(?:'re| are| have)(?: (?:holding|showing me|got))?(?: \S+){0,2}))*$/u.test(replyWords(text));

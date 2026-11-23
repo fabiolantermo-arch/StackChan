@@ -1,0 +1,249 @@
+<title>Basetta Technic Robottino</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600&family=Inter:wght@400;500&display=swap">
+<style>
+/* Layout: a manual, one step per sheet; the sheet is always paper-light, the page around it follows the theme. */
+:root{
+  --bg:#e9edf1; --fg:#1d2329; --muted:#5a6672; --sheet:#ffffff; --paper:#f4f7fa; --line:#cfd8e0;
+  --callout:#d6e7f7; --callout-line:#8fb6dc; --accent:#d4482a; --warn-bg:#fdf1dc; --warn-fg:#7a4a06;
+  --display:"Barlow Condensed","Arial Narrow",Arial,sans-serif; --body:Inter,system-ui,-apple-system,sans-serif;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--bg:#171b20;--fg:#e8ecf0;--muted:#9aa6b2;--sheet:#21262d;--line:#36404a;--warn-bg:#3a2c12;--warn-fg:#f3cf8c;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#171b20;--fg:#e8ecf0;--muted:#9aa6b2;--sheet:#21262d;--line:#36404a;--warn-bg:#3a2c12;--warn-fg:#f3cf8c;color-scheme:dark}
+body{background:var(--bg);color:var(--fg);font-family:var(--body);font-size:15px;line-height:1.55;padding-block:24px 48px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+main{max-width:880px;margin:0 auto;display:grid;gap:22px}
+h1{font-family:var(--display);font-weight:600;font-size:clamp(30px,5vw,44px);line-height:1.05;margin:0;text-wrap:balance}
+.lead{color:var(--muted);max-width:62ch;margin:6px 0 0}
+.sheet{background:var(--sheet);border:1px solid var(--line);border-radius:6px;padding:18px;display:grid;gap:12px}
+.head{display:flex;align-items:flex-start;gap:16px;flex-wrap:wrap}
+.num{font-family:var(--display);font-weight:600;font-size:64px;line-height:.85;min-width:1.2ch}
+.title{flex:1;min-width:0}
+.title h2{font-family:var(--display);font-weight:500;font-size:24px;margin:2px 0 0;letter-spacing:.01em}
+.title p{margin:2px 0 0;color:var(--muted);max-width:60ch}
+.callout{background:var(--callout);border:1.5px solid var(--callout-line);border-radius:4px;padding:6px 10px;display:flex;flex-wrap:wrap;gap:4px 14px;align-items:flex-end}
+.part{display:flex;flex-direction:column;align-items:center;font-family:var(--display);font-weight:600;font-size:18px;color:#1d2329}
+.part img{width:84px;height:60px;object-fit:contain}
+.part small{font-family:var(--body);font-weight:400;font-size:11px;color:#3d4a57}
+.pic{background:var(--paper);border-radius:4px;overflow:hidden}
+.pic img{display:block;width:100%;height:auto;aspect-ratio:3/2}
+.note{background:var(--warn-bg);color:var(--warn-fg);border-radius:4px;padding:8px 12px;font-size:14px}
+.cover .pic img{aspect-ratio:16/9}
+.list{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
+.list .part{background:var(--callout);border:1px solid var(--callout-line);border-radius:4px;padding:6px}
+footer{color:var(--muted);font-size:13px;max-width:70ch}
+@media (max-width:480px){.num{font-size:48px}.part img{width:64px;height:46px}}
+</style>
+<main>
+  <header>
+    <h1>Basetta Technic per Robottino</h1>
+    <p class="lead">Otto passi per montare la basetta con i pezzi ordinati su Pick a Brick: il robot sta al centro, i moduli sui bordi, il rover sotto. Misure in millimetri, un passo Technic è 8 mm.</p>
+  </header>
+
+  <section class="sheet cover">
+    <div class="pic"><img id="img-cover" alt="La basetta montata con robot, moduli e rover"></div>
+  </section>
+
+  <section class="sheet">
+    <div class="title"><h2>Pezzi della scatola</h2><p>Avanzano 4 perni neri, 2 travi a L, 2 perni ¾ e 2 mezzi perni, utili come scorta. La trave da 3 serve più avanti per la camera K210.</p></div>
+    <div class="list" id="inventory"></div>
+  </section>
+
+  <div id="steps" style="display:grid;gap:22px"></div>
+
+  <footer>Disegni in scala per i pezzi Lego e per i fori del robot (32 × 48 mm); robot, rover e moduli sono forme semplificate. I passi 7 e 8 dipendono da misure non ancora controllate sui pezzi veri.</footer>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+const P=8, T=7.6, R=2.4;
+const COL={beam:0x3a3d41, pinBlack:0x2a2c2f, pinBlue:0x2e6fd1, pinTan:0xd9c79b, pinGrey:0xa3a7ab, robot:0xdedbd2, screen:0x1c2a44, rover:0xe8823a, wheel:0x45484c, module:0x2f9e7a, moduleDark:0x1f6b53};
+const renderer=new THREE.WebGLRenderer({antialias:true,alpha:true,preserveDrawingBuffer:true});
+renderer.setPixelRatio(1);
+
+function mat(c){return new THREE.MeshLambertMaterial({color:c});}
+function addEdges(mesh,dark){
+  const e=new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry,28),new THREE.LineBasicMaterial({color:dark?0x0b0c0d:0x1b1f24}));
+  mesh.add(e);return mesh;
+}
+function mesh(geo,color,dark){return addEdges(new THREE.Mesh(geo,mat(color)),dark);}
+
+function stadium(len){
+  const s=new THREE.Shape(),r=3.6;
+  s.moveTo(0,-r);s.lineTo(len,-r);s.absarc(len,0,r,-Math.PI/2,Math.PI/2,false);s.lineTo(0,r);s.absarc(0,0,r,Math.PI/2,Math.PI*1.5,false);
+  return s;
+}
+function hole(x,y){const h=new THREE.Path();h.absarc(x,y,R,0,Math.PI*2,true);return h;}
+function flatGeo(shape){
+  const g=new THREE.ExtrudeGeometry(shape,{depth:T,bevelEnabled:false,curveSegments:18});
+  g.rotateX(Math.PI/2);g.translate(0,T,0);return g;
+}
+function beam(n,axis){
+  const len=(n-1)*P,s=stadium(len);
+  for(let i=0;i<n;i++)s.holes.push(hole(i*P,0));
+  const g=flatGeo(s);g.translate(-len/2,0,0);if(axis==='z')g.rotateY(Math.PI/2);
+  return mesh(g,COL.beam,true);
+}
+function frame(){
+  const W=56-0.8,D=40-0.8,r=3.6,s=new THREE.Shape();
+  s.moveTo(-W/2+r,-D/2);s.lineTo(W/2-r,-D/2);s.absarc(W/2-r,-D/2+r,r,-Math.PI/2,0,false);s.lineTo(W/2,D/2-r);s.absarc(W/2-r,D/2-r,r,0,Math.PI/2,false);
+  s.lineTo(-W/2+r,D/2);s.absarc(-W/2+r,D/2-r,r,Math.PI/2,Math.PI,false);s.lineTo(-W/2,-D/2+r);s.absarc(-W/2+r,-D/2+r,r,Math.PI,Math.PI*1.5,false);
+  for(let i=-3;i<=3;i++){s.holes.push(hole(i*P,-16));s.holes.push(hole(i*P,16));}
+  for(const z of [-8,0,8]){s.holes.push(hole(-24,z));s.holes.push(hole(24,z));}
+  const o=new THREE.Path();o.moveTo(-19,-11.4);o.lineTo(-19,11.4);o.lineTo(19,11.4);o.lineTo(19,-11.4);o.lineTo(-19,-11.4);s.holes.push(o);
+  const m=mesh(flatGeo(s),COL.beam,true);
+  for(const z of [-16,-8,0,8,16]){const d=new THREE.Mesh(new THREE.CircleGeometry(R,18),mat(0x0b0c0d));d.rotation.y=Math.PI/2;d.position.set(W/2+0.05,T/2,z);m.add(d);}
+  return m;
+}
+function lBeam(side){
+  const s=new THREE.Shape(),r=3.6,k=side;
+  s.moveTo(0,-r);s.lineTo(24,-r);s.absarc(24,0,r,-Math.PI/2,0,false);s.lineTo(24+r,8);s.absarc(24,8,r,0,Math.PI,false);s.lineTo(24-r,r);s.lineTo(0,r);s.absarc(0,0,r,Math.PI/2,Math.PI*1.5,false);
+  for(const [u,v] of [[0,0],[8,0],[16,0],[24,0],[24,8]])s.holes.push(hole(u,v));
+  const g=new THREE.ExtrudeGeometry(s,{depth:T,bevelEnabled:false,curveSegments:18});
+  g.rotateY(-Math.PI/2);g.translate(T,0,0);if(k<0)g.scale(1,1,-1);
+  return mesh(g,COL.beam,true);
+}
+function pin(kind){
+  const spec={black:[16,COL.pinBlack,8],blue:[24,COL.pinBlue,8],tan:[12,COL.pinTan,8],grey:[8,COL.pinGrey,8]}[kind];
+  const [len,c]=spec,g=new THREE.Group();
+  g.add(mesh(new THREE.CylinderGeometry(R*0.98,R*0.98,len,20),c,kind==='black'));
+  const collar=mesh(new THREE.CylinderGeometry(2.95,2.95,0.9,20),c,kind==='black');collar.position.y=len/2-(kind==='blue'?8:len/2);g.add(collar);
+  if(kind==='grey'){const k=mesh(new THREE.CylinderGeometry(2.4,2.4,1.7,20),c);k.position.y=-len/2-0.85;g.add(k);}
+  return g;
+}
+function box(w,h,d,c){return mesh(new THREE.BoxGeometry(w,h,d),c);}
+function robot(){
+  const g=new THREE.Group();
+  const base=box(48,16,54,COL.robot);base.position.y=8;g.add(base);
+  const neck=box(30,4,40,0xc9c5ba);neck.position.y=18;g.add(neck);
+  const head=box(44,54,54,COL.robot);head.position.set(-2,47,0);g.add(head);
+  const scr=new THREE.Mesh(new THREE.PlaneGeometry(40,30),mat(COL.screen));scr.rotation.y=Math.PI/2;scr.position.set(20.1,50,0);g.add(scr);
+  const eyeM=mat(0xffffff);for(const z of [-8,8]){const e=new THREE.Mesh(new THREE.CircleGeometry(2.4,16),eyeM);e.rotation.y=Math.PI/2;e.position.set(20.2,53,z);g.add(e);}
+  return g;
+}
+function module(w,h,d,c,face){
+  const g=new THREE.Group(),b=box(w,h,d,c);g.add(b);
+  if(face){const f=box(face[0],face[1],face[2],COL.moduleDark);f.position.set(face[3],face[4],face[5]);g.add(f);}
+  return g;
+}
+function rover(){
+  const g=new THREE.Group();
+  const body=box(120,26,46,COL.rover);body.position.y=-13;g.add(body);
+  for(const x of [-40,40])for(const z of [-31,31]){const w=mesh(new THREE.CylinderGeometry(22,22,15,28),COL.wheel);w.rotation.x=Math.PI/2;w.position.set(x,-24,z);g.add(w);}
+  return g;
+}
+function arrow(from,to){
+  const d=new THREE.Vector3().subVectors(to,from),len=d.length();
+  return new THREE.ArrowHelper(d.normalize(),from,len,0xd4482a,7,4.5);
+}
+
+function place(obj,x,y,z){obj.position.set(x,y,z);return obj;}
+const parts={
+  beams:()=>[place(beam(15,'x'),0,0,-16),place(beam(15,'x'),0,0,16)],
+  pinsFrame:()=>[[-16,-16],[16,-16],[-16,16],[16,16]].map(([x,z])=>place(pin('black'),x,T,z)),
+  frame:()=>[place(frame(),0,T,0)],
+  pinsCross:()=>[[-56,-16],[-56,16],[56,-16],[56,16]].map(([x,z])=>place(pin('black'),x,T,z)),
+  cross:()=>[place(beam(9,'z'),-56,T,0),place(beam(9,'z'),56,T,0)],
+  pinsRobot:()=>[[-24,-16],[-24,16],[24,-16],[24,16]].map(([x,z])=>place(pin('black'),x,2*T,z)),
+  robot:()=>[place(robot(),0,2*T,0)],
+  pinsRear:()=>[-24,-8,8,24].map(z=>place(pin('tan'),-56,2*T,z)),
+  rear:()=>[place(module(24,8,32,COL.module,[10,1,10,4,4.6,6]),-56,2*T+4,16),place(module(24,8,32,0x6c7680),-56,2*T+4,-16)],
+  pinsFront:()=>[-16,-8,8,16].map(z=>{const p=pin('black');p.rotation.z=-Math.PI/2;return place(p,28,T+T/2,z);}),
+  pinsHalf:()=>[-32,32].map(z=>{const p=pin('grey');p.rotation.z=-Math.PI/2;return place(p,28+T+2,T+T/2+8,z);}),
+  front:()=>[place(module(8,32,24,COL.module,[1,8,8,4.5,4,0]),28+T+4+1,T+T/2+8+4,-32),place(module(8,32,24,COL.module,[1,10,14,4.5,2,0]),28+T+4+1,T+T/2+8+4,32)],
+  pinsRover:()=>[[-40,-16],[-40,16],[40,-16],[40,16]].map(([x,z])=>place(pin('blue'),x,-4,z)),
+  rover:()=>[place(rover(),0,0,0)]
+};
+// The left L: long arm toward −z from z=−8, corner at z=−32. lBeam(1) builds the arm toward +z, so it is mirrored here.
+parts.lbeams=()=>{const a=lBeam(-1),b=lBeam(1);return [place(a,28,T+T/2,-8),place(b,28,T+T/2,8)];};
+
+const steps=[
+  {t:'Perni nelle travi lunghe',p:'Metti le due travi da 15 parallele, a quattro fori una dall’altra. Infila un perno nero nel sesto foro da ogni estremità.',
+   done:[],add:[['beams',null],['pinsFrame',[0,22,0]]],parts:[['beam15',2,'trave 15'],['pinBlack',4,'perno']]},
+  {t:'Telaio',p:'Appoggia il telaio 5 × 7 sulle travi: i lati lunghi vanno sopra le travi, i quattro perni entrano nel secondo foro da ogni angolo.',
+   done:['beams','pinsFrame'],add:[['frame',[0,26,0]]],parts:[['frame',1,'telaio 5 × 7']]},
+  {t:'Traverse',p:'Un perno nero nell’ultimo foro di ogni trave, poi le due travi da 9 di traverso, una davanti e una dietro.',
+   done:['beams','pinsFrame','frame'],add:[['pinsCross',[0,18,0]],['cross',[0,40,0]]],parts:[['pinBlack',4,'perno'],['beam9',2,'trave 9']]},
+  {t:'Perni per il robot',p:'Un perno nero in ognuno dei quattro fori d’angolo del telaio, a metà: sporgono di 8 mm.',
+   done:['beams','pinsFrame','frame','pinsCross','cross'],add:[['pinsRobot',[0,20,0]]],parts:[['pinBlack',4,'perno']]},
+  {t:'Robot',p:'Appoggia Robottino con lo schermo verso le traverse davanti: i fori sotto la base vanno sui quattro perni.',
+   done:['beams','pinsFrame','frame','pinsCross','cross','pinsRobot'],add:[['robot',[0,36,0]]],parts:[['robot',1,'Robottino']]},
+  {t:'Moduli dietro',p:'Quattro perni ¾ nella traversa dietro, ai lati dei perni già messi. Sopra, sensore clima a sinistra e hub Grove a destra, guardando il robot di fronte.',
+   note:'L’hub Grove si fissa così solo se ha i due fori Lego; altrimenti con una fascetta.',
+   done:['beams','pinsFrame','frame','pinsCross','cross','pinsRobot','robot'],add:[['pinsRear',[0,18,0]],['rear',[0,40,0]]],parts:[['pinTan',4,'perno ¾'],['module',2,'clima, hub']]},
+  {t:'Sensori davanti',p:'Due perni neri per lato nei fori sul bordo anteriore del telaio, due travi a L in piedi, poi distanza e presenza sui bracci verticali con un mezzo perno ciascuno.',
+   note:'Da provare: il telaio deve avere i fori laterali sul bordo anteriore, e la distanza tra i fori dei moduli va misurata quando arrivano.',
+   dir:[1,0.42,0.55],done:['beams','pinsFrame','frame','pinsCross','cross','pinsRobot','robot','pinsRear','rear'],add:[['pinsFront',[16,0,0]],['lbeams',[30,0,0]],['pinsHalf',[16,0,0]],['front',[36,0,0]]],parts:[['pinBlack',4,'perno'],['lbeam',2,'trave a L'],['pinGrey',2,'mezzo perno'],['moduleFront',2,'distanza, presenza']]},
+  {t:'Sul rover',p:'Quattro perni blu lunghi attraverso le travi da 15 e giù nei fori del rover. Muovi il rover la prima volta piano, su un tavolo sgombro.',
+   note:'Da provare: la posizione dei fori Lego sul rover non è nota. Se non cadono sotto le travi, scegli i fori delle travi che coincidono.',
+   done:['beams','pinsFrame','frame','pinsCross','cross','pinsRobot','robot','pinsRear','rear','pinsFront','lbeams','pinsHalf','front'],lift:40,add:[['rover',null],['pinsRover',[0,30,0]]],parts:[['pinBlue',4,'perno lungo'],['rover',1,'rover']]}
+];
+
+function fitAndRender(scene,w,h,dir){
+  const cam=new THREE.OrthographicCamera(-1,1,1,-1,-2000,2000);
+  const box=new THREE.Box3().setFromObject(scene),c=box.getCenter(new THREE.Vector3());
+  const d=(dir||new THREE.Vector3(1,0.85,0.95)).clone().normalize();
+  cam.position.copy(c).addScaledVector(d,600);cam.up.set(0,1,0);cam.lookAt(c);cam.updateMatrixWorld();
+  const inv=cam.matrixWorldInverse;let x0=1e9,x1=-1e9,y0=1e9,y1=-1e9;
+  for(const X of [box.min.x,box.max.x])for(const Y of [box.min.y,box.max.y])for(const Z of [box.min.z,box.max.z]){
+    const v=new THREE.Vector3(X,Y,Z).applyMatrix4(inv);x0=Math.min(x0,v.x);x1=Math.max(x1,v.x);y0=Math.min(y0,v.y);y1=Math.max(y1,v.y);}
+  let cw=(x1-x0)*1.1,ch=(y1-y0)*1.1;const a=w/h;if(cw/ch>a)ch=cw/a;else cw=ch*a;
+  const mx=(x0+x1)/2,my=(y0+y1)/2;cam.left=mx-cw/2;cam.right=mx+cw/2;cam.top=my+ch/2;cam.bottom=my-ch/2;cam.updateProjectionMatrix();
+  scene.add(new THREE.AmbientLight(0xffffff,0.62));const L=new THREE.DirectionalLight(0xffffff,0.55);L.position.set(160,300,90);scene.add(L);
+  const L2=new THREE.DirectionalLight(0xffffff,0.18);L2.position.set(-120,80,-200);scene.add(L2);
+  renderer.setSize(w,h,false);renderer.render(scene,cam);return renderer.domElement.toDataURL('image/png');
+}
+function build(keys,lift){
+  const s=new THREE.Scene(),g=new THREE.Group();s.add(g);
+  for(const k of keys)for(const o of parts[k]())g.add(o);
+  if(lift)g.position.y=lift;return s;
+}
+function stepImage(st){
+  const s=build(st.done,st.lift);
+  for(const [k,off] of st.add){
+    for(const o of parts[k]()){
+      const end=o.position.clone();if(st.lift&&k!=='rover')end.y+=0;
+      if(off){o.position.add(new THREE.Vector3(...off));
+        const from=o.position.clone(),to=end.clone();
+        const dir=new THREE.Vector3(...off).normalize();from.addScaledVector(dir,-2);to.addScaledVector(dir,Math.min(10,new THREE.Vector3(...off).length()*0.3));
+        s.add(arrow(from.clone().addScaledVector(dir,-0),to));}
+      s.add(o);
+    }
+  }
+  return fitAndRender(s,960,640,st.dir&&new THREE.Vector3(...st.dir));
+}
+const icons={
+  beam15:()=>beam(15,'x'),beam9:()=>beam(9,'x'),frame:()=>frame(),lbeam:()=>lBeam(1),
+  pinBlack:()=>{const p=pin('black');p.rotation.z=Math.PI/2.6;return p;},pinBlue:()=>{const p=pin('blue');p.rotation.z=Math.PI/2.6;return p;},
+  pinTan:()=>{const p=pin('tan');p.rotation.z=Math.PI/2.6;return p;},pinGrey:()=>{const p=pin('grey');p.rotation.z=Math.PI/2.6;return p;},
+  robot:()=>robot(),rover:()=>rover(),module:()=>module(24,8,32,COL.module,[10,1,10,4,4.6,6]),moduleFront:()=>module(8,32,24,COL.module,[1,8,8,4.5,4,0]),
+  beam3:()=>beam(3,'x')
+};
+const iconCache={};
+function icon(k){if(!iconCache[k]){const s=new THREE.Scene();s.add(icons[k]());iconCache[k]=fitAndRender(s,252,180);}return iconCache[k];}
+function partEl(k,n,label){
+  const d=document.createElement('div');d.className='part';
+  const im=document.createElement('img');im.src=icon(k);im.alt=label;d.appendChild(im);
+  const t=document.createElement('span');t.textContent=n+'x';d.appendChild(t);
+  const sm=document.createElement('small');sm.textContent=label;d.appendChild(sm);return d;
+}
+
+const inv=[['frame',1,'telaio 5 × 7'],['beam15',2,'trave 15'],['beam9',2,'trave 9'],['beam3',1,'trave 3'],['lbeam',4,'trave a L 4 × 2'],['pinBlack',20,'perno con attrito'],['pinBlue',4,'perno lungo 3'],['pinTan',6,'perno ¾'],['pinGrey',4,'mezzo perno']];
+const invEl=document.getElementById('inventory');for(const [k,n,l] of inv)invEl.appendChild(partEl(k,n,l));
+
+const host=document.getElementById('steps');
+steps.forEach((st,i)=>{
+  const sec=document.createElement('section');sec.className='sheet';
+  const head=document.createElement('div');head.className='head';
+  const num=document.createElement('div');num.className='num';num.textContent=i+1;head.appendChild(num);
+  const tt=document.createElement('div');tt.className='title';
+  const h=document.createElement('h2');h.textContent=st.t;tt.appendChild(h);
+  const p=document.createElement('p');p.textContent=st.p;tt.appendChild(p);head.appendChild(tt);
+  const co=document.createElement('div');co.className='callout';for(const [k,n,l] of st.parts)co.appendChild(partEl(k,n,l));head.appendChild(co);
+  sec.appendChild(head);
+  const pic=document.createElement('div');pic.className='pic';const im=document.createElement('img');im.alt='Passo '+(i+1)+': '+st.t;im.src=stepImage(st);pic.appendChild(im);sec.appendChild(pic);
+  if(st.note){const n=document.createElement('div');n.className='note';n.textContent=st.note;sec.appendChild(n);}
+  host.appendChild(sec);
+});
+document.getElementById('img-cover').src=fitAndRender(build(['rover','beams','pinsFrame','frame','pinsCross','cross','pinsRobot','robot','pinsRear','rear','pinsFront','lbeams','pinsHalf','front']),1280,720,new THREE.Vector3(1,0.6,1.3));
+</script>

@@ -1,0 +1,73 @@
+--- firmware/stackchan-mod/mod.js	2026-11-15 23:37:15
++++ mod.js (prova)	2026-11-15 23:37:14
+@@ -14,7 +14,7 @@
+ // import {createLegoHub} from 'robottino-lego-wire'; // LEGO switched off (14 Nov 2026), see legoOpen below
+ import {launchWithNetworks,loadNetworks,saveNetworks} from 'robottino-wifi-switch';
+ import {HeadLights} from 'robottino-lights';
+-import {createK210} from 'robottino-k210';
++import {createK210,encodeFrame} from 'robottino-k210';
+ import {createRover,GRIP_MOVES} from 'robottino-rover-wire';
+ import {RoverBody} from 'robottino-rover-body';
+ import {RoverFollow,obstacleAhead} from 'robottino-rover-follow';
+@@ -484,6 +484,53 @@
+   };
+   const k210Close=()=>{const camera=k210;k210=undefined;try{camera?.close();}catch{}};
+   try{if(Preference.get('robottino','k210')===true)k210Open();}catch{}
++  // TEMPORARY, NEVER COMMITTED (15 Nov 2026): the K210 line tried on the real robot without the camera. The chip
++  // joins what port 2 sends to what it receives on the same pin; the pretend camera's frames go out and are read back
++  // by the very code that will listen to the camera. NOTHING MAY BE PLUGGED INTO PORT C.
++  let loop,loopFrom,loopWire,loopSeq=0,loopSent=0,loopFail=0,loopPhase=-1,loopPhaseSent=0,loopPhaseGot=0,loopWrong=0,loopChecked=0,loopLast,loopWrote=false,loopDone=false,loopOpens=0,loopSpilled=false,loopLag=0,loopLagMost=0,loopLagLeast=999;
++  const LOOP_START=14000,LOOP_PHASES=[['A steady',6000],['B bursts',8000],['C overflow',9500],['D after overflow',12500],['E silence',16000],['F other wire',22000]];
++  const loopLog=line=>{if(typeof trace==='function')trace(`[robottino] k210 loop ${line}\n`);};
++  const loopWrite=count=>{
++    const bytes=new Uint8Array(count*12),from=loopSeq;
++    for(let i=0;i<count;i++){const turn=loopSeq/40*2*Math.PI;loopLast={x:.5+.3*Math.cos(turn),y:.5+.25*Math.sin(turn)};bytes.set(encodeFrame({seq:loopSeq++,faces:1,x:loopLast.x,y:loopLast.y,w:.2,h:.27,score:.85,ms:50}),i*12);}
++    try{loopWire.write(bytes.buffer);loopSent+=count;return true;}catch(error){loopFail++;loopSeq=from;loopLog('write: '+error);return false;}
++  };
++  const loopTurn=now=>{
++    if(loopDone||!Number.isFinite(now))return;
++    if(loopFrom===undefined){
++      if(now<LOOP_START)return;
++      if(k210){loopLog('skipped: the K210 line is already open');loopDone=true;return;}
++      try{
++        const found=Modules.importNow('embedded:io/serial'),Real=found?.default??found;
++        // First the line exactly as the camera's code opens it (one pin, to receive), on each wire and each port.
++        for(const port of [2])for(const pin of [18,17]){try{const only=new Real({receive:pin,port,baud:115200,format:'buffer',onReadable(){}});only.close();loopLog(`receive only G${pin} port ${port}: opened`);}catch(error){loopLog(`receive only G${pin} port ${port}: ${error}`);}}
++        for(const pin of [18,17]){try{const two=new Real({receive:pin,transmit:pin===18?17:18,port:2,baud:115200,format:'buffer',onReadable(){}});two.close();loopLog(`receive G${pin} and send on the other, port 2: opened`);}catch(error){loopLog(`receive G${pin} and send on the other: ${error}`);}}
++        const Both=function(options){loopOpens++;try{loopWire=new Real({...options,transmit:options.receive});}catch(error){loopLog(`both on G${options.receive}: ${error}`);throw error;}return loopWire;};
++        loop=createK210({Serial:Both,now:()=>clock.now(),log:line=>{if(typeof trace==='function')trace(`[robottino] ${line}\n`);}});
++      }catch(error){loopLog('cannot start: '+error);loopDone=true;return;}
++      loopFrom=now;loopLog('start');
++    }
++    const t=now-loopFrom;let phase=LOOP_PHASES.findIndex(entry=>t<entry[1]);if(phase<0)phase=LOOP_PHASES.length;
++    // What was sent a turn ago must be what the line says now.
++    if(loopWrote){loopChecked++;const face=loop.face();if(!face||Math.abs(face.x-loopLast.x)>.006||Math.abs(face.y-loopLast.y)>.006)loopWrong++;if(face){const behind=(loopSeq-1-face.seq)&255;loopLag+=behind;if(behind>loopLagMost)loopLagMost=behind;if(behind<loopLagLeast)loopLagLeast=behind;}}
++    loopWrote=false;
++    if(phase!==loopPhase){
++      if(loopPhase>=0)loopLog(`${LOOP_PHASES[loopPhase][0]}: sent ${loopSent-loopPhaseSent} got ${loop.frames-loopPhaseGot} checked ${loopChecked} wrong ${loopWrong} frames behind ${loopChecked?Math.round(loopLag*10/loopChecked)/10:0} (${loopLagLeast===999?0:loopLagLeast}-${loopLagMost}) write errors ${loopFail} opens ${loopOpens} pin now G${loop.pin} alive ${loop.alive}`);
++      loopPhase=phase;loopPhaseSent=loopSent;loopPhaseGot=loop.frames;loopWrong=0;loopChecked=0;loopLag=0;loopLagMost=0;loopLagLeast=999;
++      if(phase===LOOP_PHASES.length){try{loop.close();}catch{}loopDone=true;loopLog('done');return;}
++    }
++    try{loop.tick();}catch(error){loopLog('tick: '+error);}
++    if(!loopWire)return;
++    const name=LOOP_PHASES[phase][0][0],left=LOOP_PHASES[phase][1]-t;
++    if(left<400)return; // the last frames of a phase arrive before it is counted
++    if(name==='A'||name==='D'||name==='F')loopWrote=loopWrite(2);
++    else if(name==='B')loopWrite(10);
++    else if(name==='C'&&!loopSpilled){
++      // More than the line can hold (128 bytes) while JavaScript is busy: 28 frames, 336 bytes.
++      loopSpilled=true;const busy=ms=>{const from=clock.now();let turns=0;while(clock.now()-from<ms&&turns++<100000);};
++      loopWrite(10);busy(14);loopWrite(10);busy(14);loopWrite(8);busy(12);
++    }
++  };
+   // The LEGO Technic Hub 88012 with two motors 88013 over Bluetooth (lego-wire.js createLegoHub; owner, 14 Nov 2026:
+   // «inizia ad implementare il collegamento bluetooth per hub lego»). PREPARED, NEVER TRIED WITH A REAL HUB. Off unless
+   // switched on (preference lego, «LEGO» in the large menu): the Bluetooth stack takes about 50 KB of internal RAM.
+@@ -1789,6 +1836,7 @@
+     // a pin with the screen and a write holds JavaScript for a moment).
+     if(sdLog&&!posePending&&voice?.phase!=='speaking')try{sdLog.flush(sdLog.waiting>3000);}catch{}
+     try{k210?.tick();}catch{}
++    try{loopTurn(now);}catch(error){if(typeof trace==='function')trace(`[robottino] k210 loop error ${error}\n`);}
+     if(rover)try{roverTurn(now);}catch{}
+     try{climateTurn(now);}catch{}
+     try{presenceTurn(now);}catch{}

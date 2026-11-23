@@ -102,3 +102,24 @@ it('swear words on request are a setting: the rule goes to the agent only when A
   expect(await rules({...env,ALLOW_SWEARING:'true'} as Env)).toContain(SWEAR_RULE);
   expect(await rules({...env,ALLOW_SWEARING:'false'} as Env)).not.toContain('Parolacce:');
 });
+it('a refused English leaves the agent\'s voice as it was; a voice not confirmed is put back (code review, 19 Nov 2026)',async()=>{
+  const store=env.ROBOT_MEMORY.getByName('owner'),before=await store.preferences();
+  const save=(body:unknown)=>preferencesAPI(new Request('https://test/api/preferences',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}),config);
+  try{
+    const p=provider(italian(),()=>true);
+    expect((await save({provider:'elevenlabs',voice:'kAzI34nYjizE0zON6rXv',language:'en'})).status).toBe(502);
+    expect(p.calls.some(c=>c.method==='PATCH'&&c.body?.conversation_config?.tts),'the voice is not touched').toBe(false);
+    expect(p.agent().conversation_config.tts.voice_id).toBe('voice-1');
+    vi.restoreAllMocks();
+    // An agent that answers the PATCH but keeps showing another voice: the old one is written back.
+    const patches:any[]=[];
+    vi.spyOn(globalThis,'fetch').mockImplementation(async(_input,init)=>{
+      if(init?.method==='PATCH'){patches.push(JSON.parse(String(init.body)));return Response.json({});}
+      return Response.json({conversation_config:{tts:{voice_id:'voice-1'}}});
+    });
+    const r=await save({provider:'elevenlabs',voice:'kAzI34nYjizE0zON6rXv',language:'it'});
+    expect(r.status).toBe(502);expect(await r.json()).toEqual({error:'voice_update_unverified'});
+    expect(patches.map(b=>b.conversation_config.tts.voice_id)).toEqual(['kAzI34nYjizE0zON6rXv','voice-1']);
+    expect(await store.preferences()).toEqual(before);
+  }finally{vi.restoreAllMocks();await store.setPreferences(before);}
+});

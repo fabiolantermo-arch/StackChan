@@ -1,5 +1,5 @@
 diff --git a/modules/embedded/io/audio/in/esp32/audioin.c b/modules/embedded/io/audio/in/esp32/audioin.c
-index 893c66e..41da75f 100644
+index 893c66e..06de085 100644
 --- a/modules/embedded/io/audio/in/esp32/audioin.c
 +++ b/modules/embedded/io/audio/in/esp32/audioin.c
 @@ -97,7 +97,10 @@
@@ -14,3 +14,27 @@ index 893c66e..41da75f 100644
  
  enum {
  	kStateIdle = 0,
+@@ -260,7 +263,13 @@ void xs_audioin_constructor(xsMachine *the)
+ #endif
+ 
+ 	input->mutex = xSemaphoreCreateMutex();
+-	xTaskCreate(audioInLoop, "audioInput", 4096 + 1024, input, 10, &input->task);
++	// Robottino (13 Nov 2026): with no internal RAM left the task is not made, and start() then stopped the whole host
++	// on an assert (xTaskNotify of no task). An error the program can catch instead.
++	input->task = C_NULL;
++	if ((pdPASS != xTaskCreate(audioInLoop, "audioInput", 4096 + 1024, input, 10, &input->task)) || !input->task) {
++		input->task = C_NULL;
++		xsUnknownError("no memory for the microphone task");
++	}
+ }
+ 
+ void xs_audioin_destructor(void *it)
+@@ -747,6 +756,8 @@ done:
+ void xs_audioin_start(xsMachine *the)
+ {
+ 	AudioInput input = xsmcGetHostDataValidate(xsThis, (void *)&xsAudioInHooks);
++	if (!input->task)
++		xsUnknownError("no microphone task");
+ 	input->state = kStateRecording;
+ 	xTaskNotify(input->task, kStateRecording, eSetValueWithOverwrite);
+ }

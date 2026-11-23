@@ -27,7 +27,7 @@ async function load({power}={}){
   // The host's modules as a mod sees them: network-power only when the host has it.
   const host=new SyntheticModule(['default'],function(){this.setExport('default',{has:name=>name==='network-power'&&!!power,importNow(name){if(name!=='network-power'||!power)throw Error('not found');return power;}});},{context});
   await root.link(async name=>{if(name==='timer')return timer;if(name==='modules')return host;throw Error(name);});await root.evaluate();
-  return {Client:root.namespace.Client,connecting:root.namespace.connecting,lowLatency:root.namespace.lowLatency,sockets,timers,wss};
+  return {OPEN_HOLD_MS:root.namespace.OPEN_HOLD_MS,OPEN_LIMIT_MS:root.namespace.OPEN_LIMIT_MS,Client:root.namespace.Client,connecting:root.namespace.connecting,lowLatency:root.namespace.lowLatency,sockets,timers,wss};
 }
 const text=s=>[...new TextEncoder().encode(s)];
 test('opens wss with the host configuration (TLS verification on) and the header pairs',async()=>{
@@ -60,6 +60,19 @@ test('opens on the first room to write, delivers text, binary and messages in pa
   assert.deepEqual(events.slice(1),[[Client.receive,'{"type":"ping"}'],[Client.receive,[1,2,3]]]);
   client.write(new Uint8Array([9,1,2,3]).subarray(1));assert.deepEqual(ws.writes[1],{bytes:[1,2,3],options:{binary:true}});
 });
+test('a message that keeps coming in parts ends the link past 64 KB instead of filling the fixed memory (14 Nov 2026)',async()=>{
+  const {Client,sockets}=await load();
+  const client=new Client({host:'h',path:'/x'}),ws=sockets[0],events=[];client.callback=(type,value)=>events.push([type,value instanceof ArrayBuffer?value.byteLength:value]);
+  ws.writable(1000);
+  // 60 KB in parts is still a message.
+  for(let i=0;i<14;i++)ws.receive(new Uint8Array(4096),{binary:true,more:true});ws.receive(new Uint8Array(2656),{binary:true});
+  assert.deepEqual(events.at(-1),[Client.receive,60000]);
+  // A part that takes it past 65536 bytes: one disconnect, the parts are dropped, nothing delivered.
+  for(let i=0;i<16;i++)ws.receive(new Uint8Array(4096),{binary:true,more:true});assert.equal(events.at(-1)[0],Client.receive,'65536 bytes waiting: still fine');
+  ws.receive(new Uint8Array(1),{binary:true,more:true});
+  assert.deepEqual(events.at(-1),[Client.disconnect,undefined]);assert.equal(events.filter(([type])=>type===Client.disconnect).length,1);
+  ws.incoming.length=0;
+});
 test('a message larger than the room goes in parts, the rest when there is room again',async()=>{
   const {Client,sockets}=await load();
   const client=new Client({host:'h',path:'/x'}),ws=sockets[0];client.callback=()=>{};
@@ -91,14 +104,21 @@ test('a write the host refuses or a failing callback ends the link without throw
   assert.doesNotThrow(()=>other.write('ciao'));assert.deepEqual(seen,[Client.handshake,Client.disconnect]);
   assert.doesNotThrow(()=>ws2.options.onError());assert.deepEqual(seen,[Client.handshake,Client.disconnect],'one disconnect only');
 });
+test('an end from an error, a closing frame or a message too big gives the native connection back; a close from the other side does not close twice (code review, 19 Nov 2026)',async()=>{
+  const {Client,sockets,timers}=await load();
+  const run=()=>{for(const t of timers.splice(0).filter(t=>t.ms===0))t.fn();};
+  const a=new Client({host:'h',path:'/a'}),wa=sockets[0];a.callback=()=>{};wa.writable(100);wa.options.onError();run();assert.equal(wa.closes,1,'after an error');
+  const b=new Client({host:'h',path:'/b'}),wb=sockets[1];b.callback=()=>{};wb.writable(100);wb.serverClose();run();assert.equal(wb.closes,1,'after the closing frame');
+  const c=new Client({host:'h',path:'/c'}),wc=sockets[2];c.callback=()=>{};wc.writable(100);wc.options.onClose();run();assert.equal(wc.closes,0,'already closed by the host');
+});
 test('close sends a normal close when there is room, then lets the connection go; pairing has no header',async()=>{
   const {Client,sockets,timers}=await load();
   const client=new Client({host:'h',path:'/api/robot/pair'}),ws=sockets[0];const events=[];client.callback=type=>events.push(type);
   assert.equal(ws.options.headers.size,0);
   ws.writable(1000);client.write(new ArrayBuffer(200));client.close();
   assert.deepEqual(ws.writes.at(-1),{bytes:[0x03,0xE8],options:{opcode:8}});assert.equal(client.bufferedAmount,0);
-  assert.equal(timers.length,1);assert.equal(timers[0].ms,2000);
-  ws.options.onClose();timers[0].fn();assert.deepEqual(events,[Client.handshake],'closing on purpose is not a disconnect');
+  const closing=timers.filter(timer=>timer.ms===2000);assert.equal(closing.length,1,'one timer to let the connection go (the others are the limits on opening)');
+  ws.options.onClose();closing[0].fn();assert.deepEqual(events,[Client.handshake],'closing on purpose is not a disconnect');
   assert.throws(()=>client.write('x'),/socket_closed/);
   const early=new Client({host:'h',path:'/z'}),ws3=sockets[1];early.close();assert.equal(ws3.closes,1,'not open yet: closed at once');
 });
@@ -136,4 +156,33 @@ test('temporary timing log: nothing before probeStart, then writes, room and inc
   for(let i=0;i<200;i++)client.note('g',i);
   const lines=client.probeLines();assert.equal(lines.join('').trim().split(' ').length,64);assert.ok(lines.every(line=>line.trim().split(' ').length<=8));
   client.probeStart();assert.equal(client.probeLines().length,0);
+});
+
+// A connection that never opens and never fails (seen on the robot, 14 Nov 2026: the head held for a quarter of an hour).
+test('a connection that is only waiting stops holding the head after a few seconds, and is given up after twenty',async()=>{
+  const {Client,connecting,sockets,timers,OPEN_HOLD_MS,OPEN_LIMIT_MS}=await load();
+  const events=[],client=new Client({host:'h',path:'/a'});client.callback=type=>events.push(type);
+  assert.equal(connecting(),true);
+  const fire=ms=>{for(const timer of timers.filter(t=>t.ms===ms))timer.fn();};
+  fire(OPEN_HOLD_MS);assert.equal(connecting(),false,'six seconds with no answer: the head may move again');
+  assert.deepEqual(events,[],'the attempt itself goes on');assert.equal(sockets[0].closes,0);
+  fire(OPEN_LIMIT_MS);
+  assert.deepEqual(events,[Client.disconnect],'twenty seconds: ended, and whoever asked is told once');assert.equal(sockets[0].closes,1,'the connection is let go');
+  sockets[0].options.onError();sockets[0].options.onClose();assert.deepEqual(events,[Client.disconnect],'what comes later from it changes nothing');
+  assert.equal(connecting(),false);
+  // The count is still right: the next connection holds the head while it opens, and lets go when it is open.
+  const next=new Client({host:'h',path:'/b'});next.callback=()=>{};assert.equal(connecting(),true);
+  sockets[1].writable(100);assert.equal(connecting(),false);
+});
+test('a connection that opens late, after it stopped holding the head, opens all the same; one that opened in time is left alone',async()=>{
+  const {Client,connecting,sockets,timers,OPEN_HOLD_MS,OPEN_LIMIT_MS}=await load();
+  const fire=(from,ms)=>{for(const timer of timers.slice(from).filter(t=>t.ms===ms))timer.fn();};
+  const events=[],late=new Client({host:'h',path:'/late'});late.callback=type=>events.push(type);
+  fire(0,OPEN_HOLD_MS);assert.equal(connecting(),false);
+  sockets[0].writable(100);assert.deepEqual(events,[Client.handshake],'opened after eight seconds, say');assert.equal(connecting(),false,'and the count does not go below zero');
+  fire(0,OPEN_LIMIT_MS);assert.deepEqual(events,[Client.handshake],'not given up: it is open');assert.equal(sockets[0].closes,0);
+  const mark=timers.length,quick=new Client({host:'h',path:'/quick'});quick.callback=type=>events.push(type);
+  sockets[1].writable(100);assert.equal(connecting(),false);
+  fire(mark,OPEN_HOLD_MS);fire(mark,OPEN_LIMIT_MS);assert.equal(connecting(),false);assert.equal(sockets[1].closes,0);
+  const third=new Client({host:'h',path:'/c'});third.callback=()=>{};assert.equal(connecting(),true,'a new one still holds the head while it opens');
 });

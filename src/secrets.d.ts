@@ -6,6 +6,8 @@ interface Env {
   ELEVENLABS_VOICE_ID?: string;
   ELEVENLABS_MODEL_ID?: string;
   ALLOWED_ORIGIN?: string;
+  // The owner's place for the weather, «latitude,longitude» (robot-tools.ts fixedPlace). Kept out of the repository.
+  WEATHER_PLACE?: string;
   // Not a secret: the owner's first name for the robot's greeting (wrangler.jsonc vars).
   OWNER_NAME?: string;
   // Not a secret: "true" lets Robottino say swear words when asked (wrangler.jsonc vars).

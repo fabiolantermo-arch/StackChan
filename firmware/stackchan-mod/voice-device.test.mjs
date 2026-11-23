@@ -13,7 +13,7 @@ async function load(context,file,modules){
     if(cache.has(name))return cache.get(name);
     let module;
     if(modules[name]){module=new SyntheticModule(Object.keys(modules[name]),function(){for(const [k,v]of Object.entries(modules[name]))this.setExport(k,v);},{context});}
-    else{module=new SourceTextModule(await readFile(new URL({'robottino-voice-wire':'./voice-wire.js','robottino-live-wire':'./live-wire.js','robottino-portrait-state':'./portrait-state.js'}[name]??file,import.meta.url),'utf8'),{context});}
+    else{module=new SourceTextModule(await readFile(new URL({'robottino-voice-wire':'./voice-wire.js','robottino-live-wire':'./live-wire.js','robottino-portrait-state':'./portrait-state.js','robottino-explore':'./explore.js'}[name]??file,import.meta.url),'utf8'),{context});}
     cache.set(name,module);return module;
   };
   const root=new SourceTextModule(await readFile(new URL(file,import.meta.url),'utf8'),{context});
@@ -33,8 +33,8 @@ const imaFrame=(levels,chunks=24,sample=6000)=>{
   return frame;
 };
 const QUEUE=24; // the host's audioOut.queueLength
-async function launch({verified=true,token='test-device-credential-not-a-real-secret',busy=0,alaw=true,faceStyle}={}){
-  const context=createContext({console,ArrayBuffer,SharedArrayBuffer,Uint8Array,Int16Array,DataView,JSON,Math,Number,String,Promise});
+async function launch({verified=true,token='test-device-credential-not-a-real-secret',busy=0,alaw=true,faceStyle,greetingMs,trace,rssi,tool,agenda,rover,room,explore}={}){
+  const context=createContext({console,ArrayBuffer,SharedArrayBuffer,Uint8Array,Int16Array,DataView,JSON,Math,Number,String,Promise,...(trace?{trace}:{})});
   const sockets=[],timers=new Map(),inputs=[],outputs=[],calls=[],faults={mic:0};let tick=1000,id=0;
   class Socket{static handshake=2;static receive=3;static disconnect=-1;constructor(options){this.options=options;this.sent=[];this.bufferedAmount=0;sockets.push(this);}write(value){if(this.fail)throw Error(this.fail);this.sent.push(value);}close(){this.closed=true;}}
   // Like the Moddable driver, read() with no argument returns what is buffered (the announced size, or less).
@@ -76,14 +76,15 @@ async function launch({verified=true,token='test-device-credential-not-a-real-se
   const radios=[];
   const modules={'robottino-socket':{Client:Socket,lowLatency(){const lease={open:true,close(){lease.open=false;}};radios.push(lease);return lease;}},preference:{default:{get(_d,key){return key==='deviceToken'?token:key==='verified'?verified:undefined;}}},
     timer:{default:{repeat(fn,delay){const n=++id;timers.set(n,{fn,delay});return n;},set(fn,delay){const n=++id;timers.set(n,{fn,delay,once:true});return n;},clear(n){timers.delete(n);}}},time:{default:{get ticks(){return tick;},delta(start){return tick-start;}}},
-    modules:{default:{has(name){return alaw&&name==='ChatAudioIO/Codecs';},importNow(name){if(!alaw||name!=='ChatAudioIO/Codecs')throw Error('not found');return codecs;}}},
+    modules:{default:{has(name){return alaw&&name==='ChatAudioIO/Codecs'||rssi!==undefined&&name==='net';},importNow(name){if(rssi!==undefined&&name==='net')return {default:{get:what=>what==='RSSI'?rssi:undefined}};if(!alaw||name!=='ChatAudioIO/Codecs')throw Error('not found');return codecs;}}},
     'embedded:io/audio/in':{default:Input},'pins/audioout':{default:Output}};
   const ns=await load(context,'./voice-device.js',modules);
   const robot={face:{setMouthOpen(v){calls.push(['mouth',v]);}},connectivity:{network:{ready:Promise.resolve()}},audio:{acquireExclusive(){if(busy-->0)throw Error('audio busy');calls.push(['audio.reserve']);return()=>calls.push(['audio.release']);}}};
-  const hooks={stats(text,test){calls.push(['stats',text,test]);},listening(){calls.push(['listening']);},ended(reason){calls.push(['ended',reason]);},memory(e){calls.push(['memory',e]);},mood(m){calls.push(['mood',m]);},see(){calls.push(['see']);},timer(t){calls.push(['timer',t]);},head(c){calls.push(['head',c]);},face(c){calls.push(['face',c]);},...(faceStyle===undefined?{}:{faceStyle})};
+  const hooks={stats(text,test){calls.push(['stats',text,test]);},lips(name){calls.push(['lips',name]);},listening(){calls.push(['listening']);},ended(reason){calls.push(['ended',reason]);},memory(e){calls.push(['memory',e]);},mood(m){calls.push(['mood',m]);},see(){calls.push(['see']);},timer(t){calls.push(['timer',t]);},head(c){calls.push(['head',c]);},face(c){calls.push(['face',c]);},...(faceStyle===undefined?{}:{faceStyle}),...(greetingMs===undefined?{}:{greetingMs}),...(rover===undefined?{}:{roverReady:()=>rover,rover(c){calls.push(['rover',c]);}}),...(explore===undefined?{}:{explore(c){calls.push(['explore',c]);return explore;}})};
+  if(tool){hooks.tool=tool;hooks.agenda=()=>agenda??[];hooks.room=()=>room;}
   const voice=ns.createVoiceDevice(robot,hooks);
   const flush=async()=>{for(let i=0;i<20;i++)await Promise.resolve();};
-  return {voice,sockets,timers,inputs,outputs,calls,faults,radios,flush,tick(v){tick=v;},
+  return {voice,sockets,timers,inputs,outputs,calls,faults,radios,flush,tick(v){tick=v;},now(){return tick;},
     receive(value){sockets[0].callback(Socket.receive,typeof value==='string'?value:JSON.stringify(value));},binary(bytes){sockets[0].callback(Socket.receive,bytes.slice().buffer);},handshake(){sockets[0].callback(Socket.handshake);},disconnect(){sockets[0].callback(Socket.disconnect);},
     sent(){return sockets[0].sent.map(v=>typeof v==='string'?JSON.parse(v):{audio:v});},runTimers(){for(const t of [...timers.values()])t.fn();},
     runOnce(){for(const [n,t] of [...timers])if(t.once){timers.delete(n);t.fn();}},
@@ -92,19 +93,59 @@ async function launch({verified=true,token='test-device-credential-not-a-real-se
 const same=(actual,expected,message)=>assert.deepEqual(JSON.parse(JSON.stringify(actual)),expected,message);
 const pcm=(value,count=320)=>{const a=new Int16Array(count).fill(value);return b64.encode(a.buffer);};
 const playAll=speaker=>{let n=0;while(speaker.play())n++;return n;};
-async function listening(){
-  const h=await launch();await h.voice.start();h.handshake();
+async function listening(options){
+  const h=await launch(options);await h.voice.start();h.handshake();
   h.receive({type:'conversation_initiation_metadata',conversation_initiation_metadata_event:{user_input_audio_format:'pcm_16000',agent_output_audio_format:'pcm_16000'}});
   h.tick(2000); // past the microphone's first 400 ms
   return {...h,mic:h.inputs[0],stats:()=>h.calls.filter(([n])=>n==='stats').map(([,t])=>t)};
 }
+const READY={type:'conversation_initiation_metadata',conversation_initiation_metadata_event:{user_input_audio_format:'pcm_16000',agent_output_audio_format:'pcm_16000'}};
+test('the microphone waits for Robottino\'s greeting: a noise at the opening no longer silences the whole call (14 Nov 2026)',async()=>{
+  // 13 Nov 2026, 23:36: the call opened, no greeting came and nothing was heard for 30 s. With the microphone open
+  // in the second before the greeting, a noise is the user speaking for the provider, which then drops its greeting.
+  const h=await launch({greetingMs:3000});await h.voice.start();h.handshake();h.receive(READY);
+  assert.ok(h.calls.some(([n])=>n==='listening'),'the call is ready for the rest of the robot');
+  assert.equal(h.inputs.length,0,'no microphone yet: nothing goes to the provider before the greeting');assert.equal(h.voice.phase,'connecting');
+  // The greeting arrives: the speaker plays it, and the microphone opens when it has been said.
+  h.tick(1900);h.binary(imaFrame([3,3,3,3,3,3]));assert.equal(h.voice.phase,'speaking');assert.equal(h.inputs.length,0);
+  const speaker=h.outputs[0];h.tick(2100);for(const t of [...h.timers.values()])if(!t.once)t.fn();playAll(speaker);
+  for(let at=2200;at<=4400&&!h.inputs.length;at+=100){h.tick(at);for(const t of [...h.timers.values()])if(!t.once)t.fn();}
+  assert.equal(h.inputs.length,1,'the greeting is over: now it listens');assert.ok(h.inputs[0].started);assert.equal(h.voice.phase,'listening');
+  // The timer of the wait fires later: nothing more to do.
+  h.tick(6000);h.runOnce();assert.equal(h.inputs.length,1);h.voice.stop();
+});
+test('no greeting at all: the microphone opens after the wait; with OpenAI (no greeting asked) at once',async()=>{
+  const h=await launch({greetingMs:3000});await h.voice.start();h.handshake();h.receive(READY);
+  assert.equal(h.inputs.length,0);const wait=[...h.timers.values()].find(t=>t.once&&t.delay===3000);assert.ok(wait,'one timer for the wait');
+  h.tick(4000);h.runOnce();assert.equal(h.inputs.length,1,'nothing came: it listens anyway');assert.equal(h.voice.phase,'listening');h.voice.stop();
+  // Stopped during the wait: the timer is cleared and no microphone ever opens.
+  const c=await launch({greetingMs:3000});await c.voice.start();c.handshake();c.receive(READY);c.voice.stop();
+  assert.equal([...c.timers.values()].some(t=>t.once&&t.delay===3000),false);c.runOnce();assert.equal(c.inputs.length,0);
+  const a=await launch({greetingMs:3000});await a.voice.start();a.handshake();a.receive({type:'session.started'});
+  assert.equal(a.inputs.length,1,'OpenAI: listening at once, as before');a.voice.stop();
+});
+test('why a conversation ended in error, and how strong the Wi-Fi is, go on the USB log (14 Nov 2026)',async()=>{
+  const lines=[],h=await launch({trace:text=>lines.push(text),rssi:-71});await h.voice.start();h.handshake();h.receive(READY);
+  const mic=h.inputs[0];h.tick(2000);mic.options.onReadable.call(mic,3200);
+  h.tick(7000);for(const t of [...h.timers.values()])if(!t.once&&t.delay===1000)for(let i=0;i<5;i++)t.fn();
+  assert.ok(lines.some(line=>/^\[robottino\] mic .* q0k rssi-71\n$/.test(line)),lines.join(''));
+  // The microphone cannot be opened again after a reply (no memory for its task): the reason is written.
+  h.receive({type:'audio',audio_event:{audio_base_64:pcm(6000)}});assert.equal(h.voice.speaking,true);
+  h.faults.mic=1;h.voice.interrupt();h.runOnce();
+  assert.ok(lines.some(line=>line==='[robottino] voice error tap:i2s busy\n'),lines.join(''));
+  assert.deepEqual(h.calls.filter(([n])=>n==='ended').map(([,r])=>r),['error']);
+  // Without the host's net module the lines are as before.
+  const plain=[],b=await launch({trace:text=>plain.push(text)});await b.voice.start();b.handshake();b.receive(READY);
+  b.tick(2000);b.inputs[0].options.onReadable.call(b.inputs[0],3200);b.tick(7000);for(const t of [...b.timers.values()])if(!t.once&&t.delay===1000)for(let i=0;i<5;i++)t.fn();
+  assert.ok(plain.some(line=>/ q0k\n$/.test(line)),plain.join(''));b.voice.stop();
+});
 test('robot conversation needs verified hardware and its own credential',async()=>{
   await assert.rejects((await launch({verified:false})).voice.start(),/hardware_unverified/);
   await assert.rejects((await launch({token:''})).voice.start(),/missing_credential/);
 });
 test('robot conversation takes turns: listens, closes the microphone to speak, then listens again',async()=>{
   const h=await launch();assert.equal(await h.voice.start(),true);await h.flush();
-  assert.equal(h.sockets[0].options.path,'/api/robot/voice?audio=ima&mic=alaw');assert.equal(h.sockets[0].options.Socket,undefined);assert.equal(h.inputs.length,0,'microphone waits for the provider');
+  assert.equal(h.sockets[0].options.path,'/api/robot/voice?audio=ima&lips=1&mic=alaw');assert.equal(h.sockets[0].options.Socket,undefined);assert.equal(h.inputs.length,0,'microphone waits for the provider');
   h.handshake();h.receive({type:'conversation_initiation_metadata',conversation_initiation_metadata_event:{user_input_audio_format:'pcm_16000',agent_output_audio_format:'pcm_16000'}});
   assert.ok(h.calls.some(([n])=>n==='listening'));const mic=h.inputs[0];assert.equal(mic.options.sampleRate,16000);assert.ok(mic.started);
   assert.equal(h.outputs.length,0,'the speaker stays closed while listening');
@@ -117,11 +158,11 @@ test('robot conversation takes turns: listens, closes the microphone to speak, t
   same(speaker.options,{streams:1,sampleRate:16000,bitsPerSample:16,numChannels:1});assert.equal(speaker.volume,256,'the provider level, no gain: +6 dB made the amplifier crackle');
   assert.equal(speaker.queue.length,0,'waits for 400 ms of audio or the end of the reply');
   h.tick(1750);h.runTimers();const played=speaker.play();
-  assert.equal(played.count,320);assert.equal(played.sample,6000,'played as received');assert.deepEqual(h.mouths().at(-1),.58,'the mouth starts opening with the words (about 45 ms to open, like the app)');
+  assert.equal(played.count,320);assert.equal(played.sample,6000,'played as received');assert.deepEqual(h.mouths().at(-1),.265,'the mouth starts opening with the words, half of the way at each 32 ms step (12 Nov 2026)');
   h.receive({type:'ping',ping_event:{event_id:9}});assert.deepEqual(h.sent().at(-1),{type:'pong',event_id:9});
   h.receive({type:'user_transcript',user_transcription_event:{user_transcript:'Ricorda che amo il mare'}});assert.deepEqual(h.sent().at(-1),{type:'memory.command',text:'Ricorda che amo il mare'});
-  h.tick(2949);h.runTimers();assert.equal(h.inputs.length,1,'still speaking right after the last word');
-  h.tick(2950);h.runTimers();assert.ok(speaker.closed,'the speaker closes 1.2 s after the last word started');assert.equal(h.mouths().at(-1),0);
+  h.tick(2299);h.runTimers();assert.equal(h.inputs.length,1,'still speaking right after the last word');
+  h.tick(2300);h.runTimers();assert.ok(speaker.closed,'the speaker closes once no reply audio has come for 0.8 s (the last word started 0.55 s ago)');assert.equal(h.mouths().at(-1),0);
   const again=h.inputs[1];assert.ok(again.started,'and the microphone opens again');assert.equal(h.voice.speaking,false);
   again.options.onReadable.call(again,3200);const sent=h.sent().filter(m=>m.audio).length;h.tick(3500);again.options.onReadable.call(again,3200);
   assert.equal(h.sent().filter(m=>m.audio).length,sent+1);
@@ -160,7 +201,7 @@ test('the conversation phase for the head lights: connecting, listening, thinkin
 });
 test('without the host A-law codec the microphone falls back to μ-law',async()=>{
   const {ulawEncode}=await voiceWire(),h=await launch({alaw:false});await h.voice.start();
-  assert.equal(h.sockets[0].options.path,'/api/robot/voice?audio=ima');
+  assert.equal(h.sockets[0].options.path,'/api/robot/voice?audio=ima&lips=1');
   h.handshake();h.receive({type:'conversation_initiation_metadata',conversation_initiation_metadata_event:{user_input_audio_format:'pcm_16000',agent_output_audio_format:'pcm_16000'}});
   h.tick(2000);h.inputs[0].options.onReadable.call(h.inputs[0],3200);
   assert.deepEqual([...h.sent().at(-1).audio],[...ulawEncode(new Uint8Array(3200).fill(1))]);h.voice.stop();
@@ -182,10 +223,12 @@ test('OpenAI silence after the last word does not keep the speaker open',async()
   a.tick(1250);a.runTimers();assert.equal(speaker.play().count,1440,'60 ms of words');
   a.tick(1500);for(let i=0;i<5;i++)a.receive({type:'session.output_audio.delta',delta:pcm(0,1440)}); // silence between words still plays
   a.tick(1700);a.runTimers();assert.equal(playAll(speaker),5);
-  // The mouth closes in about 200 ms after the words (three of the silent pieces): the turn ends 1.2 s after that.
-  a.tick(2899);a.runTimers();assert.equal(speaker.closed,undefined,'1.2 s after the mouth closed');
+  // OpenAI keeps sending silence: the network is never quiet, so the turn ends 1.2 s after the mouth closed (about
+  // 200 ms after the words, three of the silent pieces).
+  for(const at of [2100,2500]){a.tick(at);a.receive({type:'session.output_audio.delta',delta:pcm(0,1440)});a.runTimers();playAll(speaker);}
+  a.tick(2899);a.receive({type:'session.output_audio.delta',delta:pcm(0,1440)});a.runTimers();playAll(speaker);assert.equal(speaker.closed,undefined,'1.2 s after the mouth closed');
   a.tick(2900);a.receive({type:'session.output_audio.delta',delta:pcm(0,1440)});assert.equal(speaker.queue.length,0,'later silence is dropped, not played');
-  a.runTimers();assert.ok(speaker.closed);assert.ok(a.inputs[1].started);assert.equal(speaker.played.length,6);
+  a.runTimers();assert.ok(speaker.closed);assert.ok(a.inputs[1].started);assert.equal(speaker.played.length,6,'the silence that kept coming was never played');
   a.voice.stop();
 });
 test('long provider chunks move the mouth with each ~97 ms segment, not once per chunk',async()=>{
@@ -195,8 +238,10 @@ test('long provider chunks move the mouth with each ~97 ms segment, not once per
   const speaker=h.outputs[0];h.tick(2200);h.runTimers();
   assert.deepEqual(speaker.queue.map(e=>'id' in e?'callback '+e.id:e.count),['callback 1',1548,'callback 2',1548],'each segment behind a callback with its number');
   speaker.play();h.tick(2264);h.runTimers();assert.equal(h.mouths().some(v=>v>0),false,'closed during the silent part');
-  speaker.play();assert.equal(h.mouths().at(-1),.58,'opens when the voice starts inside the same chunk');
-  h.tick(2297);h.runTimers();assert.equal(h.mouths().at(-1),.8,'and opens fully 32 ms later, between two callbacks');
+  speaker.play();assert.equal(h.mouths().at(-1),.265,'opens when the voice starts inside the same chunk');
+  h.tick(2297);h.runTimers();assert.equal(h.mouths().at(-1),.58,'and goes on opening 32 ms later, between two callbacks');
+  h.tick(2330);h.runTimers();assert.equal(h.mouths().at(-1),.69);h.tick(2363);h.runTimers();assert.equal(h.mouths().at(-1),.8,'fully open in about a tenth of a second');
+  {const levels=[0,.09,.18,.265,.35,.465,.58,.69,.8],seen=h.mouths().map(v=>levels.indexOf(v));assert.ok(seen.every(v=>v>=0),'only the eight levels');}
   h.voice.stop();
 });
 test('a tap while Robottino speaks stops it, drops the rest of the reply and listens again',async()=>{
@@ -207,7 +252,7 @@ test('a tap while Robottino speaks stops it, drops the rest of the reply and lis
   assert.equal(h.sent().filter(m=>m.type==='playback.clear').length,1,'the Worker drops the reply it still holds');
   h.receive({type:'audio',audio_event:{audio_base_64:pcm(6000)}});assert.equal(h.outputs.length,1,'the rest of the old reply is dropped');
   h.receive({type:'interruption'});h.receive({type:'audio',audio_event:{audio_base_64:pcm(6000)}});
-  const next=h.outputs[1];h.tick(2500);h.runTimers();next.play();assert.equal(h.mouths().at(-1),.58,'a new reply plays after the provider confirms');
+  const next=h.outputs[1];h.tick(2500);h.runTimers();next.play();assert.equal(h.mouths().at(-1),.265,'a new reply plays after the provider confirms');
   assert.equal(h.voice.interrupt(),true);h.voice.stop();assert.match(h.stats().at(-1),/ i2 /);
 });
 test('callbacks still queued when the speaker closes are ignored',async()=>{
@@ -216,20 +261,41 @@ test('callbacks still queued when the speaker closes are ignored',async()=>{
   assert.doesNotThrow(()=>late(3));assert.equal(h.mouths().length,mouths,'no mouth after closing');assert.equal(h.inputs.length,2);assert.equal(h.voice.active,true);
   h.voice.stop();
 });
-test('a short reply plays once no audio has come for 200 ms; back to listening 1.2 s after its last word',async()=>{
+test('a short reply plays once no audio has come for 200 ms; back to listening when none has come for 0.8 s (12 Nov 2026)',async()=>{
   const h=await listening();
   h.receive({type:'audio',audio_event:{audio_base_64:pcm(6000,960)}});const speaker=h.outputs[0];
   h.tick(2199);h.runTimers();assert.equal(speaker.queue.length,0,'more words may come');
   h.tick(2200);h.runTimers();assert.equal(speaker.queue.length,2,'then it plays what it has');speaker.play();
-  h.tick(3399);h.runTimers();assert.equal(speaker.closed,undefined,'not before 1.2 s');
-  h.tick(3400);h.runTimers();assert.ok(speaker.closed);assert.ok(h.inputs[1].started);
+  h.tick(2799);h.runTimers();assert.equal(speaker.closed,undefined,'not before the network has been quiet for 0.8 s');
+  h.tick(2800);h.runTimers();assert.ok(speaker.closed,'0.6 s after the word, not 1.2 s: «passa molto tempo… a quando i led si accendono di blu»');assert.ok(h.inputs[1].started);
   h.voice.stop();assert.match(h.stats().at(-1),/ i0 s1 v0 /);
+});
+test('a reply whose next piece is late keeps the speaker; the last word is never cut (12 Nov 2026)',async()=>{
+  // The longest wait between two pieces of one reply seen on the robot was about 0.6 s (11 Nov 2026).
+  const h=await listening();
+  h.receive({type:'audio',audio_event:{audio_base_64:pcm(6000,960)}});const speaker=h.outputs[0];h.tick(2200);h.runTimers();playAll(speaker);
+  h.tick(2650);h.runTimers();assert.equal(speaker.closed,undefined,'0.65 s without audio: the reply may go on');
+  for(let n=0;n<2;n++)h.receive({type:'audio',audio_event:{audio_base_64:pcm(6000,4000)}});h.tick(2900);h.runTimers();assert.equal(speaker.closed,undefined,'it went on');
+  // Half a second of words: played to the end even with the network quiet for longer than that.
+  let at=2900;while(speaker.queue.length){speaker.play();at+=97;h.tick(at);h.runTimers();assert.equal(speaker.closed,undefined,'words still to play');}
+  h.tick(at+249);h.runTimers();assert.equal(speaker.closed,undefined,'the last word is still sounding');
+  h.tick(at+400);h.runTimers();assert.ok(speaker.closed);assert.ok(h.inputs[1].started);h.voice.stop();
 });
 test('a speaker that never reports still hands the turn back',async()=>{
   const h=await listening();
   h.receive({type:'audio',audio_event:{audio_base_64:pcm(6000,960)}});const speaker=h.outputs[0];h.tick(2200);h.runTimers();assert.equal(speaker.queue.length,2);
   h.tick(5399);h.runTimers();assert.equal(speaker.closed,undefined);
   h.tick(5400);h.runTimers();assert.ok(speaker.closed,'3.2 s after the audio was handed over at most');assert.ok(h.inputs[1].started);
+  h.voice.stop();
+});
+test('the face goes back to neutral when the reply has been said, not only when the user next speaks (16 Nov 2026)',async()=>{
+  // Owner: «quando smette di parlare torna alla posa sorridente, invece deve tornare alla posa neutra».
+  const h=await listening(),mood=()=>h.calls.filter(([n])=>n==='mood').at(-1)?.[1];
+  for(let i=0;i<3;i++)h.binary(imaFrame([3,4,4,0,0,0]));const speaker=h.outputs[0];
+  h.receive({type:'agent_response',agent_response_event:{agent_response:'Che bello, ahah!'},robot_mood:'happy'});
+  assert.equal(mood().expression,'happy','happy while it speaks');
+  speaker.play();h.tick(2400);h.runTimers();playAll(speaker);for(const t of [2700,2733,2766,2799,2832,3300,3700]){h.tick(t);h.runTimers();}
+  assert.ok(speaker.closed,'the reply is over, the microphone open again');assert.equal(mood().expression,'neutral','the face is neutral again');
   h.voice.stop();
 });
 test('timers go to the robot, not to the memory server, and replies set the mood',async()=>{
@@ -334,6 +400,40 @@ test('reads what the microphone really has, even less than announced',async()=>{
   assert.equal(h.voice.active,true,'no invalid size error');assert.equal(h.sent().filter(m=>m.audio).length,1,'four 800-byte reads make one 100 ms chunk');
   h.voice.stop();
 });
+test('the shape of the lips of each letter goes to the face: its half-way picture for one step, then the shape (16 Nov 2026)',async()=>{
+  // Owner: «nuove espressioni per migliorare movimenti labbra». Each pose byte: loudness pose + 16 × shape.
+  const h=await listening(),lips=()=>h.calls.filter(([n])=>n==='lips').map(([,name])=>name||'0');
+  // «o» (2) said aloud for 97 ms, then pressed lips (1) in a silence for 64 ms, then nothing.
+  for(let i=0;i<3;i++)h.binary(imaFrame([3+32,4+32,4+32,16,16,0]));
+  const speaker=h.outputs[0];assert.deepEqual(lips(),[],'nothing before the sound');
+  speaker.play();assert.deepEqual(lips(),['2h'],'half way to the round mouth');const mouths=[h.mouths().at(-1)];
+  for(const t of [2033,2066,2097]){h.tick(t);h.runTimers();mouths.push(h.mouths().at(-1));}
+  assert.deepEqual(lips(),['2h','2'],'then the round mouth, and it stays');
+  assert.equal(mouths.length,4);assert.ok(mouths.every(v=>v===0||v===undefined),'behind a shape the mouth of the loudness is not drawn');
+  // The screen changes between shapes at most every 96 ms, and a shape stays 110 ms at least (owner: «il movimento delle
+  // labbra è troppo scattoso»): the next one waits for that.
+  const at=[];let last=lips().length;
+  h.tick(2130);speaker.play();
+  for(let t=2130;t<=2600;t+=33){h.tick(t);h.runTimers();while(at.length<lips().length-last)at.push(t);}
+  // 17 Nov 2026 («rendi più realistico il movimento della bocca»): never a cut from a whole shape to another or to the
+  // closed mouth: the picture half way between the two for an instant («12», then «1h» on the way to closed).
+  assert.deepEqual(lips(),['2h','2','12','1','1h','0'],'pressed lips although there is no sound, then no letter: back to the mouth of the loudness');
+  assert.ok(at[1]-at[0]<=40&&at[3]-at[2]<=40,'a passage lasts one step: '+at);assert.ok(at[2]-at[1]>=96,'a shape stays before the next passage: '+at);
+  assert.ok(h.mouths().every(v=>v===0),'the loudness mouth stayed closed behind the shapes');
+  h.voice.stop();
+  // A vowel said softly stays at its half-way picture; said louder it goes on to the shape, and back.
+  const soft=await listening();for(let i=0;i<3;i++)soft.binary(imaFrame([1+48,1+48,1+48,3+48,3+48,1+48]));
+  const softLips=()=>soft.calls.filter(([n])=>n==='lips').map(([,name])=>name||'0');
+  soft.outputs[0].play();for(const t of [2033,2066,2097]){soft.tick(t);soft.runTimers();}assert.deepEqual(softLips(),['3h']);
+  soft.outputs[0].play();assert.deepEqual(softLips(),['3h','3']);for(const t of [2130,2163,2196,2229]){soft.tick(t);soft.runTimers();}assert.deepEqual(softLips().slice(0,3),['3h','3','3h']);soft.voice.stop();
+  // The wide «e/i» (4) is a smile with the teeth: it never goes beyond its half-way picture, however loud.
+  const wide=await listening();for(let i=0;i<3;i++)wide.binary(imaFrame([3+64,4+64,4+64,3+64,4+64,4+64]));
+  const wideLips=()=>wide.calls.filter(([n])=>n==='lips').map(([,name])=>name||'0');
+  wide.outputs[0].play();for(const t of [2033,2066,2097]){wide.tick(t);wide.runTimers();}assert.ok(wideLips().length>0);assert.ok(wideLips().every(x=>x==='4h'),'only the half-way picture: '+wideLips());wide.voice.stop();
+  // A shape the robot does not know is no shape; the loudness pose is read all the same.
+  const odd=await listening();for(let i=0;i<3;i++)odd.binary(imaFrame([3+96,4+96,4+96,0,0,0]));
+  odd.outputs[0].play();assert.equal(odd.calls.some(([n])=>n==='lips'),false);assert.equal(odd.mouths().at(-1),.265);odd.voice.stop();
+});
 test('a binary IMA frame from the Worker goes to the driver as it is, with its mouth levels',async()=>{
   const h=await listening();
   for(let i=0;i<3;i++)h.binary(imaFrame([3,4,4,0,0,0])); // 3 × 194 ms: past the 400 ms start; one mouth pose per 32 ms
@@ -343,15 +443,16 @@ test('a binary IMA frame from the Worker goes to the driver as it is, with its m
   assert.deepEqual([header.getUint8(0),header.getUint8(1),header.getUint8(2),header.getUint8(3),header.getUint16(4,true),header.getUint8(6),header.getUint8(7),header.getUint32(8,true)],[0x6d,0x61,1,16,16000,1,1,3096],'Moddable maud header: IMA, 16 kHz, mono');
   assert.equal(sab.byteLength,12+24*68,'one copy of the chunks, outside the JavaScript heap');assert.equal(speaker.queue[3].buffer,sab,'both segments share it');
   speaker.play();const mouths=[h.mouths().at(-1)];for(const t of [2033,2066,2097]){h.tick(t);h.runTimers();mouths.push(h.mouths().at(-1));}
-  assert.deepEqual(mouths,[.58,.8,.8,.8],'the poses of the segment, 32 ms apart, then held while the next one is due');
-  speaker.play();assert.equal(h.mouths().at(-1),0);h.tick(2300);h.runTimers();assert.equal(h.mouths().at(-1),0);
-  h.tick(2400);h.runTimers();playAll(speaker);h.tick(2700);h.runTimers();assert.equal(h.mouths().at(-1),0,'the mouth closes when the speaker runs dry');
+  assert.deepEqual(mouths,[.265,.58,.69,.8],'towards the poses of the segment (.58, .8, .8), half of the way every 32 ms');
+  speaker.play();h.tick(2130);h.runTimers();assert.equal(h.mouths().at(-1),.35,'it closes through the levels too');for(const t of [2163,2196,2229]){h.tick(t);h.runTimers();}assert.equal(h.mouths().at(-1),0,'closed about 130 ms after the sound');
+  h.tick(2400);h.runTimers();playAll(speaker);for(const t of [2700,2733,2766,2799,2832]){h.tick(t);h.runTimers();}assert.equal(h.mouths().at(-1),0,'the mouth closes when the speaker runs dry');
   h.binary(new Uint8Array(70).fill(1));h.sockets[0].callback(3,new ArrayBuffer(20000));
   h.voice.stop();assert.match(h.stats().at(-1),/ a3 x2 /,'a malformed and an oversized frame are ignored');
 });
 test('frames from a Worker with one mouth level per segment still move the mouth',async()=>{
   const h=await listening();for(let i=0;i<3;i++)h.binary(imaFrame([2,0])); // until 9 Nov 2026: one level per 97 ms
-  const speaker=h.outputs[0];speaker.play();assert.equal(h.mouths().at(-1),.35);speaker.play();assert.equal(h.mouths().at(-1),0);
+  const speaker=h.outputs[0];speaker.play();assert.equal(h.mouths().at(-1),.18,'towards .35');h.tick(2040);h.runTimers();assert.equal(h.mouths().at(-1),.265);h.tick(2080);h.runTimers();assert.equal(h.mouths().at(-1),.35);
+  speaker.play();h.tick(2120);h.runTimers();h.tick(2160);h.runTimers();h.tick(2200);h.runTimers();assert.equal(h.mouths().at(-1),0);
   h.voice.stop();
 });
 test('μ-law matches the telephone standard and the Worker',async()=>{
@@ -400,8 +501,8 @@ test('speaker check without the network: a recorded phrase takes the path of a r
   await h.flush();assert.equal(h.sockets.length,0,'no network');h.runTimers();
   const speaker=h.outputs[0];assert.ok(speaker.started);assert.equal(speaker.volume,128);assert.equal(h.inputs.length,0,'no microphone');
   assert.equal(playAll(speaker),12,'about 1.2 s in 12 segments, all through the driver');assert.ok(speaker.played.every(e=>e.ima&&e.sample===6000));
-  h.tick(2199);h.runTimers();assert.equal(speaker.closed,undefined,'the last segment is still playing');
-  h.tick(2200);h.runTimers();h.runOnce();await played;
+  h.tick(1799);h.runTimers();assert.equal(speaker.closed,undefined,'the last segment is still playing');
+  h.tick(1800);h.runTimers();h.runOnce();await played;
   assert.ok(speaker.stopped&&!speaker.closed,'stopped at once, closed a little later (callbacks on their way, audioout.c)');
   assert.ok(!h.calls.some(([n])=>n==='audio.release'),'the speaker goes back to the host only once closed');
   h.runOnce();assert.ok(speaker.closed);assert.equal(done,'test','resolves when the phrase has been played');assert.equal(h.inputs.length,0,'still no microphone at the end');assert.ok(h.calls.some(([n,r])=>n==='ended'&&r==='test'));
@@ -416,11 +517,11 @@ test('the faster μ-law encoder gives exactly the bytes of the standard formula'
   assert.deepEqual([...ulawEncode(odd.subarray(1))],[reference(1000),reference(-1000),reference(32767)],'a view that starts on an odd byte');
 });
 test('the robot tells the Worker which face it shows, so the agent speaks in the feminine or masculine',async()=>{
-  for(const [style,path] of [['redhead','/api/robot/voice?audio=ima&mic=alaw&face=redhead'],['white','/api/robot/voice?audio=ima&mic=alaw&face=white'],['portrait','/api/robot/voice?audio=ima&mic=alaw&face=portrait']]){
+  for(const [style,path] of [['redhead','/api/robot/voice?audio=ima&lips=1&mic=alaw&face=redhead'],['white','/api/robot/voice?audio=ima&lips=1&mic=alaw&face=white'],['portrait','/api/robot/voice?audio=ima&lips=1&mic=alaw&face=portrait'],['curly','/api/robot/voice?audio=ima&lips=1&mic=alaw&face=curly']]){
     const h=await launch({faceStyle:()=>style});await h.voice.start();await h.flush();assert.equal(h.sockets[0].options.path,path);h.voice.stop();
   }
-  const odd=await launch({faceStyle:()=>'x&y'});await odd.voice.start();await odd.flush();assert.equal(odd.sockets[0].options.path,'/api/robot/voice?audio=ima&mic=alaw','an unknown face is not sent');odd.voice.stop();
-  const broken=await launch({faceStyle:()=>{throw Error('no face');}});await broken.voice.start();await broken.flush();assert.equal(broken.sockets[0].options.path,'/api/robot/voice?audio=ima&mic=alaw');broken.voice.stop();
+  const odd=await launch({faceStyle:()=>'x&y'});await odd.voice.start();await odd.flush();assert.equal(odd.sockets[0].options.path,'/api/robot/voice?audio=ima&lips=1&mic=alaw','an unknown face is not sent');odd.voice.stop();
+  const broken=await launch({faceStyle:()=>{throw Error('no face');}});await broken.voice.start();await broken.flush();assert.equal(broken.sockets[0].options.path,'/api/robot/voice?audio=ima&lips=1&mic=alaw');broken.voice.stop();
 });
 test('the Wi-Fi stays awake for the whole conversation, from before the connection opens to its end (10 Nov 2026)',async()=>{
   const h=await launch();assert.equal(h.radios.length,0);
@@ -431,6 +532,33 @@ test('the Wi-Fi stays awake for the whole conversation, from before the connecti
   const off=await launch({verified:false});await assert.rejects(off.voice.start(),/hardware_unverified/);assert.equal(off.radios.length,0,'a refused conversation takes no lease');
 });
 
+test('rover first (15 Nov 2026): with the rover answering, «vai avanti», «destra», «girati a sinistra» move the rover, not the head',async()=>{
+  const h=await listening({rover:true});
+  assert.match(h.sockets[0].options.path,/&rover=1/,'the service is told the rover answers');
+  const heard=text=>{const before=h.calls.length;h.receive({type:'user_transcript',user_transcription_event:{user_transcript:text}});return JSON.parse(JSON.stringify(h.calls.slice(before).filter(([n])=>['head','rover'].includes(n))));};
+  // The user's right is the robot's left.
+  assert.deepEqual(heard('Vai avanti.'),[['rover',{move:'forward'}]]);assert.deepEqual(heard('Indietro.'),[['rover',{move:'back'}]]);
+  assert.deepEqual(heard('Destra.'),[['rover',{move:'left'}]]);assert.deepEqual(heard('Spostati a sinistra.'),[['rover',{move:'right'}]]);
+  assert.deepEqual(heard('Girati a destra.'),[['rover',{move:'turnLeft'}]]);assert.deepEqual(heard('Voltati a sinistra.'),[['rover',{move:'turnRight'}]]);
+  assert.deepEqual(heard('Fermati.'),[['rover',{move:'stop'}]]);assert.deepEqual(heard('Vieni qui.'),[['rover',{move:'forward'}]]);
+  // The gripper (15 Nov 2026).
+  assert.deepEqual(heard('Apri la pinza.'),[['rover',{move:'gripOpen'}]]);assert.deepEqual(heard('Robottino, chiudi la pinza!'),[['rover',{move:'gripClose'}]]);
+  assert.deepEqual(heard('Afferralo.'),[['rover',{move:'gripClose'}]]);assert.deepEqual(heard('Molla.'),[['rover',{move:'gripOpen'}]]);
+  // «Chiudi poco» and «chiudi tutto» (the owner's names), with or without the word.
+  assert.deepEqual(heard('Chiudi poco.'),[['rover',{move:'gripHalf'}]]);assert.deepEqual(heard('Chiudi tutto.'),[['rover',{move:'gripClose'}]]);
+  assert.deepEqual(heard('Chiudi un po\' la pinza.'),[['rover',{move:'gripHalf'}]]);assert.deepEqual(heard('Chiudi la pinza a metà.'),[['rover',{move:'gripHalf'}]]);
+  assert.deepEqual(heard('Chiudi tutta la pinza.'),[['rover',{move:'gripClose'}]]);assert.deepEqual(heard('Stringi piano la pinza.'),[['rover',{move:'gripHalf'}]]);
+  assert.deepEqual(heard('Non aprire la pinza.'),[]);assert.deepEqual(heard('Com\'è fatta la pinza?'),[]);
+  // Only commands (code review, 15 Nov 2026): a sentence that merely holds one of the words moves nothing; the Italian «come» is not the English one.
+  for(const said of ['Come stai?','Come ti chiami?','Come?','Dimmi come funziona.','Andiamo avanti con la storia.','Vai avanti con la storia.','Torna indietro di una canzone.'])assert.deepEqual(heard(said).filter(([n])=>n==='rover'),[],said);
+  assert.deepEqual(heard('Vai un po\' più avanti.'),[['rover',{move:'forward'}]]);assert.deepEqual(heard('Robottino, vieni da me!'),[['rover',{move:'forward'}]]);
+  assert.deepEqual(heard('Come here.'),[['rover',{move:'forward'}]]);assert.deepEqual(heard('Torna indietro.'),[['rover',{move:'back'}]]);
+  // About the head or looking, and up and down: still the head.
+  assert.deepEqual(heard('Guarda a destra.'),[['head',{direction:'right'}]]);assert.deepEqual(heard('Gira la testa a sinistra.'),[['head',{direction:'left'}]]);
+  assert.deepEqual(heard('Alto.'),[['head',{direction:'up'}]]);assert.deepEqual(heard('Non andare avanti.'),[]);
+  const off=await listening({rover:false});assert.doesNotMatch(off.sockets[0].options.path,/rover/);
+  off.receive({type:'user_transcript',user_transcription_event:{user_transcript:'Destra.'}});assert.deepEqual(JSON.parse(JSON.stringify(off.calls.filter(([n])=>['head','rover'].includes(n)))),[['head',{direction:'right'}]],'no rover: the head as before');
+});
 test('from the provider’s words to the robot: the transcripts of 11 Nov 2026 become head and face commands, nothing else',async()=>{
   const h=await listening();
   const heard=text=>{const before=h.calls.length;h.receive({type:'user_transcript',user_transcription_event:{user_transcript:text}});return JSON.parse(JSON.stringify(h.calls.slice(before).filter(([n])=>['head','face','timer','memory'].includes(n))));};
@@ -452,6 +580,26 @@ test('from the provider’s words to the robot: the transcripts of 11 Nov 2026 b
   h.receive({type:'agent_response',agent_response_event:{agent_response:'Fammi vedere meglio…'}});assert.equal(seen(),before+2,'once');assert.equal(h.calls.filter(([n])=>n==='head').length,heads,'and the reply to it moves nothing');
 });
 
+test('the phase for the head lights: searching the web and looking, between speaking and the answer (12 Nov 2026)',async()=>{
+  const h=await listening(),say=()=>h.receive({type:'audio',audio_event:{audio_base_64:pcm(6000,960)}});
+  const until=(ms,step=100)=>{for(let t=h.now()+step;t<=ms;t+=step){h.tick(t);h.runTimers();}h.tick(ms);h.runTimers();};
+  assert.equal(h.voice.phase,'listening');
+  // «Devo controllare, dammi un attimo» is being said when the server starts the search: blue, then yellow.
+  say();h.tick(2200);h.runTimers();playAll(h.outputs[0]);h.receive({type:'robot.search',active:true});assert.equal(h.voice.phase,'speaking','speaking shows over the search');
+  until(2800);assert.equal(h.voice.phase,'searching','silent and searching');
+  until(12000);assert.equal(h.voice.phase,'searching','a search of ten seconds');
+  h.receive({type:'robot.search',active:false});until(13000);assert.equal(h.voice.phase,'searching','until the answer starts');
+  say();h.tick(13200);h.runTimers();playAll(h.outputs.at(-1));assert.equal(h.voice.phase,'speaking');until(14200);assert.equal(h.voice.phase,'listening','the answer was said: listening again');
+  // A search that never reports its end, or whose answer never comes, does not keep the light.
+  h.receive({type:'robot.search',active:true});until(20000);assert.equal(h.voice.phase,'searching');h.receive({type:'robot.search',active:false});until(22900);assert.equal(h.voice.phase,'searching');until(23100);assert.equal(h.voice.phase,'listening','3 s after its end');
+  h.receive({type:'robot.search',active:true});until(40000);h.receive({type:'user_transcript',user_transcription_event:{user_transcript:'Ci sei ancora?'}});until(52900);assert.equal(h.voice.phase,'searching');until(53200);assert.equal(h.voice.phase,'listening','never longer than 30 s');
+  // «Cos'è questo?»: «Fammi vedere…» while the picture is on its way is not the answer.
+  h.voice.look('start');assert.equal(h.voice.phase,'looking');say();h.tick(53400);h.runTimers();playAll(h.outputs.at(-1));assert.equal(h.voice.phase,'speaking');
+  until(54400);assert.equal(h.voice.phase,'looking');h.voice.look('sent');until(58000);assert.equal(h.voice.phase,'looking','the server is reading the picture');
+  say();h.tick(58200);h.runTimers();playAll(h.outputs.at(-1));until(59200);assert.equal(h.voice.phase,'listening','the description was said');
+  h.voice.look('start');h.voice.look('end');assert.equal(h.voice.phase,'listening','a picture that could not be taken');
+  h.voice.look('start');h.voice.stop();assert.equal(h.voice.phase,'idle');
+});
 test('a piece of the picture goes on the conversation’s connection only when it has room; a closed conversation refuses it (11 Nov 2026)',async()=>{
   const h=await listening(),piece=new Uint8Array(3850);
   const socket=h.sockets[0],binary=()=>socket.sent.filter(value=>value===piece).length;
@@ -459,6 +607,30 @@ test('a piece of the picture goes on the conversation’s connection only when i
   socket.bufferedAmount=5000;assert.equal(h.voice.picture(piece),false,'no room: it waits');assert.equal(binary(),1);
   socket.bufferedAmount=0;h.voice.pictureFailed();assert.ok(socket.sent.includes(JSON.stringify({type:'see.failed'})));
   h.voice.stop();assert.throws(()=>h.voice.picture(piece),/closed/);
+});
+test('when the user’s words gave no face command, the face follows the feeling Robottino says it has, once (12 Nov 2026)',async()=>{
+  // From the robot's log of 11 Nov 2026: the voice turned angry or sad and the face stayed serene, because the
+  // sentence was not one of the robot's face commands while the agent took it as one.
+  const h=await listening();
+  const faces=()=>JSON.parse(JSON.stringify(h.calls.filter(([n])=>n==='face')));
+  const user=text=>h.receive({type:'user_transcript',user_transcription_event:{user_transcript:text}});
+  const said=text=>h.receive({type:'agent_response',agent_response_event:{agent_response:text}});
+  user('Parolaccia.');said('Grrr, adesso sono proprio arrabbiata! Non si dicono certe parole!');
+  assert.deepEqual(faces(),[['face',{expression:'angry'}]],'the angry voice brings the angry face');
+  said('Grrr, adesso sono proprio arrabbiata!');assert.equal(faces().length,1,'once per turn');
+  user('You are sad now.');said('Oh no… that is so sad.');assert.deepEqual(faces().at(-1),['face',{expression:'sad'}]);assert.equal(faces().length,2);
+  user('Fai la faccia arrabbiata.');said('Grrr, adesso sono proprio arrabbiata!');assert.equal(faces().length,3,'the user’s own command, not twice');
+  user('Dai, adesso smettila.');said('Va bene, sono tornata normale!');assert.deepEqual(faces().at(-1),['face',{expression:'normal'}]);assert.equal(faces().length,4);
+  user('Sei arrabbiata con me?');said('No, non sono arrabbiata, sto benissimo!');assert.equal(faces().length,4,'never what it says it is not');
+  user('Che tempo fa oggi?');said('Uff, oggi ci sono dieci gradi e qualche nuvola.');assert.equal(faces().length,4,'a grumble alone is not a face');
+  user('Oggi il mio gatto sta male.');said('Oh no, che tristezza, mi dispiace tanto per il tuo gatto. Vuoi raccontarmi come sta adesso?');
+  assert.equal(faces().length,4,'a long kind answer is not the sad face that stays');
+  user('Raccontami una storia.');said('C’era una volta una principessa che viveva in un castello lontano lontano, e un giorno disse al drago: sono arrabbiata con te!');
+  assert.equal(faces().length,4,'only the opening of the reply counts');
+  // A reply that comes in pieces (OpenAI), after a sentence that is complete only when the reply starts.
+  h.receive({type:'session.input_transcript.delta',delta:'Adesso '});h.receive({type:'session.input_transcript.delta',delta:'fammi paura'});
+  for(const piece of ['Gr','rr, adesso sono ','proprio arrabbiata!'])h.receive({type:'session.output_transcript.delta',delta:piece});
+  assert.deepEqual(faces().at(-1),['face',{expression:'angry'}]);assert.equal(faces().length,5,'as soon as the pieces say it, once');
 });
 test('when the user’s words gave no command, the robot does the head move Robottino says it did, once (11 Nov 2026)',async()=>{
   const h=await listening();
@@ -472,4 +644,113 @@ test('when the user’s words gave no command, the robot does the head move Robo
   user('Mi senti?');said('Sì, ti sento benissimo!');assert.equal(moves().length,2,'no move in the reply: nothing');
   user('Puoi alzare un po\' lo sguardo?');said('Non posso alzare la testa ora.');assert.equal(moves().length,2,'never what it says it cannot do');
   user('Va bene così, grazie mille davvero.');said('Ecco, ho alzato la testa.');assert.deepEqual(moves().at(-1),['head',{direction:'up'}]);
+});
+
+test('the agent\'s tools: the robot says it has them, sends its reminders, does each tool and answers with its id (14 Nov 2026)',async()=>{
+  const done=[];let finish;
+  const h=await launch({agenda:[{at:Date.UTC(2026,10,15,8,0),text:'pane'}],tool(command){done.push(command);if(command.tool==='dance')return new Promise(resolve=>{finish=resolve;});return command.tool==='face'?{ok:true}:{ok:false,code:'motors_off'};}});
+  await h.voice.start();assert.match(h.sockets[0].options.path,/&tools=1$/);
+  h.handshake();assert.equal(h.sent().length,0,'nothing before the Worker says it has the tools');
+  h.receive({type:'robot.tools'});same(h.sent()[0],{type:'robot.agenda',items:[{at:Date.UTC(2026,10,15,8,0),text:'pane'}]});
+  h.receive(READY);
+  h.receive({type:'robot.tool',id:7,tool:'face',expression:'sad',extra:'x'});await h.flush();
+  same(done.at(-1),{tool:'face',expression:'sad'});same(h.sent().at(-1),{type:'robot.tool.result',id:7,ok:true});
+  h.receive({type:'robot.tool',id:8,tool:'head',direction:'left',full:true});await h.flush();
+  same(h.sent().at(-1),{type:'robot.tool.result',id:8,ok:false,code:'motors_off'});
+  // A move answers when it has finished, not before.
+  h.receive({type:'robot.tool',id:9,tool:'dance'});await h.flush();assert.notEqual(h.sent().at(-1).id,9);
+  finish({ok:true});await h.flush();same(h.sent().at(-1),{type:'robot.tool.result',id:9,ok:true});
+  // Unknown or malformed tools are not done.
+  const count=done.length;
+  for(const bad of [{tool:'head',direction:'behind',id:10},{tool:'head',direction:'left'},{tool:'timer',action:'set',seconds:3,id:11},{tool:'reminder',action:'add',at:5,text:'x',id:12},{tool:'open_door',id:13},{tool:'face',expression:'happy',id:1.5}])h.receive({type:'robot.tool',...bad});
+  await h.flush();assert.equal(done.length,count);
+  h.receive({type:'robot.tool',id:14,tool:'reminder',action:'add',at:Date.UTC(2026,10,15,8,0),text:'chiamare\nMarco'});await h.flush();
+  same(done.at(-1),{tool:'reminder',action:'add',at:Date.UTC(2026,10,15,8,0),text:'chiamare Marco'});
+  // The rover (muovi_rover): the robot's own directions, 300–3000 ms, or stop; nothing else.
+  h.receive({type:'robot.tool',id:15,tool:'rover',move:'turnLeft',ms:800,speed:100});await h.flush();
+  same(done.at(-1),{tool:'rover',move:'turnLeft',ms:800});
+  h.receive({type:'robot.tool',id:16,tool:'rover',move:'stop'});await h.flush();same(done.at(-1),{tool:'rover',move:'stop',ms:0});
+  h.receive({type:'robot.tool',id:26,tool:'rover',move:'gripClose'});await h.flush();same(done.at(-1),{tool:'rover',move:'gripClose',ms:0});
+  h.receive({type:'robot.tool',id:27,tool:'rover',move:'gripOpen',ms:900});await h.flush();same(done.at(-1),{tool:'rover',move:'gripOpen',ms:0});
+  h.receive({type:'robot.tool',id:28,tool:'rover',move:'gripHalf'});await h.flush();same(done.at(-1),{tool:'rover',move:'gripHalf',ms:0});
+  const roverCount=done.length;
+  for(const bad of [{tool:'rover',move:'fly',ms:800,id:17},{tool:'rover',move:'forward',ms:5000,id:18},{tool:'rover',move:'forward',id:19}])h.receive({type:'robot.tool',...bad});
+  await h.flush();assert.equal(done.length,roverCount);
+  h.voice.stop();
+});
+test('without the tools hook the robot does not ask for them; the voice tag sets the face for the whole reply',async()=>{
+  const h=await launch();await h.voice.start();assert.doesNotMatch(h.sockets[0].options.path,/tools/);h.handshake();
+  h.receive({type:'robot.tools'});assert.equal(h.sent().length,0,'no agenda');h.receive(READY);
+  h.receive({type:'agent_response',agent_response_event:{agent_response:'Oh, che bello!'},robot_mood:'sad'});
+  same(h.calls.filter(([n])=>n==='mood').at(-1),['mood',{expression:'sad',gesture:null}],'the tag wins over the words');
+  h.receive({type:'agent_response',agent_response_event:{agent_response:'Ciao.'},robot_mood:'evil'});
+  same(h.calls.filter(([n])=>n==='mood').at(-1),['mood',{expression:'sad',gesture:null}],'unknown moods are ignored; the reply keeps its tag');
+  h.voice.stop();
+});
+test('a tool used on a sentence: the reply\'s words do not move the head again',async()=>{
+  const heads=[];const h=await launch({tool:()=>({ok:true})});
+  await h.voice.start();h.handshake();h.receive(READY);
+  h.receive({type:'user_transcript',user_transcription_event:{user_transcript:'Mi fai vedere la finestra?'}});
+  h.receive({type:'robot.tool',id:1,tool:'head',direction:'left',full:false});await h.flush();
+  const before=h.calls.filter(([n])=>n==='head').length;
+  h.receive({type:'agent_response',agent_response_event:{agent_response:'Ecco, guardo a sinistra.'}});
+  assert.equal(h.calls.filter(([n])=>n==='head').length,before);
+  h.voice.stop();
+});
+test('a timer that ends during the call: the agent is asked to say it, only by a Worker with the tools (14 Nov 2026)',async()=>{
+  const h=await launch({tool:()=>({ok:true})});await h.voice.start();h.handshake();h.receive(READY);
+  assert.equal(h.voice.notice('Tempo scaduto: tè!'),false,'not before the Worker says it knows the message');
+  h.receive({type:'robot.tools'});assert.equal(h.voice.notice('Tempo scaduto: tè!'),false,'a Worker that does not take the notice');
+  h.receive({type:'robot.tools',notice:true});assert.equal(h.voice.notice('Tempo scaduto: tè!'),true);
+  same(h.sent().at(-1),{type:'robot.notice',text:'Tempo scaduto: tè!'});
+  h.voice.stop();assert.equal(h.voice.notice('x'),false,'closed');
+});
+
+test('the room\'s temperature and humidity go to a Worker that takes them, before the reminders (21 Nov 2026: «se gli chiedo la temperatura… mi risponda utilizzando i dati del sensore»)',async()=>{
+  const h=await launch({agenda:[],room:{t:19.04,h:56.4,p:98690.6},tool(){return {ok:true};}});
+  await h.voice.start();h.handshake();
+  h.receive({type:'robot.tools',notice:true,room:true});
+  same(h.sent()[0],{type:'robot.room',t:19,h:56,p:98691});same(h.sent()[1],{type:'robot.agenda',items:[]});
+  // A Worker that does not say room:true would not know the message: never sent there. No sensor: nothing sent.
+  const old=await launch({agenda:[],room:{t:19,h:56},tool(){return {ok:true};}});await old.voice.start();old.handshake();
+  old.receive({type:'robot.tools',notice:true});same(old.sent().map(m=>m.type),['robot.agenda']);
+  const none=await launch({agenda:[],tool(){return {ok:true};}});await none.voice.start();none.handshake();
+  none.receive({type:'robot.tools',notice:true,room:true});same(none.sent().map(m=>m.type),['robot.agenda']);
+});
+test('«Esplora la stanza» (23 Nov 2026): with or without the rover (without, the owner carries the robot), the words go to mod.js; the service is told the robot can explore; the start and end are sent with `still`',async()=>{
+  for(const rover of [false,true]){
+    const h=await listening({rover,explore:true});
+    assert.match(h.sockets[0].options.path,/&explore=1/,'the service is told');
+    const heard=text=>{const before=h.calls.length;h.receive({type:'user_transcript',user_transcription_event:{user_transcript:text}});return JSON.parse(JSON.stringify(h.calls.slice(before).filter(([n])=>['explore','rover','head'].includes(n))));};
+    assert.deepEqual(heard('Esplora la stanza!'),[['explore','start']],'rover '+rover);assert.deepEqual(heard('Basta esplorare.'),[['explore','stop']],'before the faces: «basta» is not «basta facce»');
+    assert.deepEqual(heard('Mi piace esplorare posti nuovi.'),[]);
+    assert.equal(h.voice.explore(true,true,true),true);same(h.sent().at(-1),{type:'explore',on:true,say:true,still:true});
+  }
+  const old=await listening({rover:false});assert.doesNotMatch(old.sockets[0].options.path,/explore/,'a robot that cannot: nothing said');
+});
+test('«Esplora» (23 Nov 2026): no end for 30 s of silence while exploring («quando è in esplorazione non deve esserci il timer dei 30 secondi di silenzio»); while a picture goes out the microphone gives way to it',async()=>{
+  const h=await listening({explore:true}),socket=h.sockets[0],audio=()=>h.sent().filter(m=>m.audio).length;
+  h.voice.explore(true,false,true);
+  for(let t=2000;t<=120000;t+=1000){h.tick(t);h.runTimers();}
+  assert.ok(!h.calls.some(([n])=>n==='ended'),'two minutes quiet while exploring: still on');
+  h.voice.explore(false);h.tick(125000);h.runTimers();assert.ok(!h.calls.some(([n])=>n==='ended'),'the silence counts again from the end');
+  h.tick(156000);h.runTimers();assert.deepEqual(h.calls.at(-1),['ended','silence']);
+  const g=await listening(),gs=g.sockets[0],sent=()=>g.sent().filter(m=>m.audio).length;
+  gs.bufferedAmount=8000;g.mic.options.onReadable.call(g.mic,3200);assert.equal(sent(),1,'8 KB waiting: the microphone goes on');
+  g.voice.look('start');g.mic.options.onReadable.call(g.mic,3200);assert.equal(sent(),1,'a picture to send: the microphone gives way above 4 KB');
+  gs.bufferedAmount=1000;g.mic.options.onReadable.call(g.mic,3200);assert.equal(sent(),2,'room: both');
+  gs.bufferedAmount=8000;g.voice.look('sent');g.mic.options.onReadable.call(g.mic,3200);assert.equal(sent(),3,'the picture is out: as before');
+});
+
+test('exploration forwards a local identity only while exploring, and can clear it',async()=>{
+  const h=await listening({explore:true});
+  assert.equal(h.voice.person('Ada'),false);
+  h.voice.explore(true,false,true);
+  assert.equal(h.voice.person('Ada'),true);
+  same(h.sent().at(-1),{type:'explore',on:true,identityOnly:true,name:'Ada'});
+  h.voice.person();
+  same(h.sent().at(-1),{type:'explore',on:true,identityOnly:true,name:null});
+  h.voice.explore(false);
+  assert.equal(h.voice.person('Ada'),false);
+  h.voice.stop();
 });

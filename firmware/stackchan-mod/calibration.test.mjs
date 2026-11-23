@@ -89,8 +89,8 @@ test('one head speed: timed from where the head is, inside the calibrated range'
   assert.ok(Math.abs(far.y+(743-493)/(1800/Math.PI*.32))<1e-9,'90° asked, the calibrated end reached: '+far.y);
   assert.ok(servoPositions({y:.3,p:0},cal).yaw<493,'positive yaw (the robot\'s left) goes to lower servo positions on the K151');
   assert.ok(Math.abs(far.p+(868-621)/(1800/Math.PI*.32))<1e-9,'up to the calibrated top');
-  assert.equal(HEAD_SPEED,3);assert.equal(MIN_MOVE,.1);
-  assert.ok(Math.abs(moveTime({y:0,p:0},{y:Math.PI/2,p:0})-Math.PI/6)<1e-9,'90° in about half a second at 3 rad/s');
+  assert.equal(HEAD_SPEED,6,'the fastest asked of the servos (owner, 13 Nov 2026)');assert.equal(MIN_MOVE,.1);
+  assert.ok(Math.abs(moveTime({y:0,p:0},{y:Math.PI/2,p:0})-Math.PI/12)<1e-9,'90° in about a quarter of a second at 6 rad/s');
   assert.equal(moveTime({y:0,p:0},{y:.01,p:0}),MIN_MOVE,'a small step takes the shortest time');
   assert.ok(Number.isNaN(moveTime({y:NaN,p:0},{y:0,p:0})));
 });

@@ -8,10 +8,21 @@
 import Timer from 'timer';
 import Modules from 'modules';
 const CLOSE_WAIT_MS=2000;
+// A message that arrives in several parts is put together here, in the robot's fixed JavaScript memory: past this
+// size the connection ends instead (nothing the server sends is that large: reply audio and events stay under 16 KB).
+const MAX_MESSAGE=65536;
 const bytesOf=text=>typeof ArrayBuffer.fromString==='function'?ArrayBuffer.fromString(text):new TextEncoder().encode(text).buffer;
 const textOf=buffer=>typeof String.fromArrayBuffer==='function'?String.fromArrayBuffer(buffer):new TextDecoder().decode(buffer);
 // Connections being opened (DNS, TCP, TLS handshake). The handshake keeps the robot busy for long stretches: no
 // head command starts meanwhile (mod.js), so a servo reply is never read late (9 Nov 2026).
+// But not for ever (14 Nov 2026, from the log on the card: at 15:28:59 the Live link ended, the new one never got
+// its answer and never failed either, and from then on no head command left for a quarter of an hour: the robot
+// woke at a voice, chose where to look and did not move, «apre gli occhi però non si gira verso di me»). So:
+// - a connection that has not opened after OPEN_HOLD_MS no longer holds the head: on a network that works it opens
+//   in two or three seconds, and one that is only waiting does not keep the robot busy;
+// - one that has not opened after OPEN_LIMIT_MS is ended here, as if the server had closed it: whoever asked for it
+//   is told and tries again as after any other loss.
+export const OPEN_HOLD_MS=6000,OPEN_LIMIT_MS=20000;
 let opening=0;
 export const connecting=()=>opening>0;
 // Wi-Fi without power saving while something streams (camera, call, conversation; 10 Nov 2026). At rest the host
@@ -35,7 +46,7 @@ const PROBE_EVENTS=64;
 const join=(a,b)=>{const out=new Uint8Array(a.byteLength+b.byteLength);out.set(new Uint8Array(a),0);out.set(new Uint8Array(b),a.byteLength);return out.buffer;};
 export class Client{
   static handshake=2;static receive=3;static disconnect=4;
-  #client;#open=false;#ended=false;#opening=true;#writable=0;#queue=[];#queued=0;#message;#probe;#probeCount=0;#probeAt=0;
+  #client;#open=false;#ended=false;#opening=true;#holding=true;#writable=0;#queue=[];#queued=0;#message;#probe;#probeCount=0;#probeAt=0;
   callback;
   constructor({host,port=443,path='/',headers=[]}){
     const pairs=new Map();for(let i=0;i+1<headers.length;i+=2)pairs.set(headers[i],headers[i+1]);
@@ -48,9 +59,15 @@ export class Client{
       onWritable:count=>{try{this.#writableNow(count);}catch{this.#end();}},
       // A close from the server: stop at once. The client answers it and shuts the connection by itself.
       onControl:opcode=>{if(opcode===8)this.#end();},
-      onClose:()=>this.#end(),
+      onClose:()=>this.#end(false),
       onError:()=>this.#end()
     });}catch(error){this.#opened();throw error;}
+    Timer.set(()=>{if(this.#opening&&this.#holding){this.#holding=false;opening--;}},OPEN_HOLD_MS);
+    Timer.set(()=>{
+      if(!this.#opening||this.#ended)return;
+      if(typeof trace==='function')trace(`[robottino] link not open after ${OPEN_LIMIT_MS/1000} s: given up\n`);
+      const client=this.#client;this.#end(false);try{client.close();}catch{}
+    },OPEN_LIMIT_MS);
   }
   probeStart(){this.#probe??=new Int32Array(PROBE_EVENTS*5);this.#probeCount=0;this.#probeAt=Date.now();}
   note(kind,a=0,b=0,c=0){
@@ -66,7 +83,7 @@ export class Client{
     }
     return lines;
   }
-  #opened(){if(this.#opening){this.#opening=false;opening--;}}
+  #opened(){if(this.#opening){this.#opening=false;if(this.#holding){this.#holding=false;opening--;}}}
   // Bytes not yet handed to the connection.
   get bufferedAmount(){return this.#queued;}
   // Bytes the connection takes right now without making them wait (none while something already waits).
@@ -89,9 +106,14 @@ export class Client{
     if(this.#open&&this.#writable>=2){try{client.write(Uint8Array.of(0x03,0xE8),{opcode:8});Timer.set(()=>{try{client.close();}catch{}},CLOSE_WAIT_MS);return;}catch{}}
     try{client.close();}catch{}
   }
-  #end(){
+  // An end from an error, a closing frame, a message too big or a failed write also gives the native connection back
+  // (code review, 19 Nov 2026: only the close from the other side and the open limit did, and each error left a TLS
+  // connection of tens of KB open). Closed just after, not from inside the native callback. closeClient false: it
+  // is already closed.
+  #end(closeClient=true){
     if(this.#ended)return;
     this.#ended=true;this.#queue=[];this.#queued=0;this.#opened();
+    if(closeClient){const client=this.#client;Timer.set(()=>{try{client?.close();}catch{}},0);}
     try{this.callback?.(Client.disconnect);}catch{}
   }
   #writableNow(count){
@@ -126,6 +148,7 @@ export class Client{
     const data=this.#client.read(count);
     if(this.#ended||!this.#open)return;
     const message=this.#message?join(this.#message,data):data;
+    if(message.byteLength>MAX_MESSAGE){this.#message=undefined;this.#end();return;}
     if(options?.more){this.#message=message;return;}
     this.#message=undefined;
     this.callback?.(Client.receive,options?.binary?message:textOf(message));

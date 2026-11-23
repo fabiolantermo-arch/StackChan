@@ -1,0 +1,18 @@
+diff --git a/firmware/host/modules/input/imu.ts b/firmware/host/modules/input/imu.ts
+index f58cc97..e08f280 100644
+--- a/firmware/host/modules/input/imu.ts
++++ b/firmware/host/modules/input/imu.ts
+@@ -42,6 +42,13 @@ export default class IMU {
+     return copySample(this.#lastSample)
+   }
+ 
++  // Robottino (14 Nov 2026): the last reading as it came from the sensor, for a mod that judges the motion itself
++  // (lifted, put down, tilted while the head is turned). The events only say «shake» and «fallen», never «upright
++  // again», and they take the head looking up for a fall: on this robot the sensor is in the head.
++  get sample(): IMUSample {
++    return this.#lastSample
++  }
++
+   start(): void {
+     if (this.#timer) return
+     this.#timer = Timer.repeat(() => {

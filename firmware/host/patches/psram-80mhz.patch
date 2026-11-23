@@ -1,0 +1,17 @@
+diff --git a/firmware/host/modules/audio/platforms/m5stackchan-cores3/sdkconfig/sdkconfig.defaults b/firmware/host/modules/audio/platforms/m5stackchan-cores3/sdkconfig/sdkconfig.defaults
+index 0a31529..a5936a1 100644
+--- a/firmware/host/modules/audio/platforms/m5stackchan-cores3/sdkconfig/sdkconfig.defaults
++++ b/firmware/host/modules/audio/platforms/m5stackchan-cores3/sdkconfig/sdkconfig.defaults
+@@ -17,8 +17,10 @@ CONFIG_SPIRAM=y
+ CONFIG_SPIRAM_MODE_OCT=n
+ CONFIG_SPIRAM_MODE_QUAD=y
+ CONFIG_SPIRAM_SPEED_120M=n
+-CONFIG_SPIRAM_SPEED_80M=n
+-CONFIG_SPIRAM_SPEED_40M=y
++# Robottino (13 Nov 2026): the external RAM at 80 MHz. The neural face detector keeps its working memory there, and
++# so does the JavaScript machine; at 40 MHz a search took 0.19 s and the owner's face was lost whenever it moved.
++CONFIG_SPIRAM_SPEED_80M=y
++CONFIG_SPIRAM_SPEED_40M=n
+ CONFIG_SPIRAM_TYPE_AUTO=y
+ CONFIG_SPIRAM_IGNORE_NOTFOUND=y
+ CONFIG_SPIRAM_USE_MALLOC=y

@@ -18,6 +18,15 @@ extension UIImage {
                   let cg = CGImage(width: packet.width, height: packet.height, bitsPerComponent: 8, bitsPerPixel: 8, bytesPerRow: packet.width, space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue), provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent) else { return nil }
             return UIImage(cgImage: cg)
         }
+        if packet.kind == 8 {
+            // A JPEG picture from the robot (14 Nov 2026): decoded by the system, and shown only if it is the size the
+            // robot said (nothing larger than the robot's camera is ever drawn).
+            guard let source = CGImageSourceCreateWithData(packet.payload as CFData, [kCGImageSourceTypeIdentifierHint: "public.jpeg"] as CFDictionary),
+                  CGImageSourceGetType(source) as String? == "public.jpeg",
+                  let cg = CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary),
+                  cg.width == packet.width, cg.height == packet.height else { return nil }
+            return UIImage(cgImage: cg)
+        }
         guard packet.kind == 1 else { return nil }
         let input = [UInt8](packet.payload); var rgba = [UInt8](repeating: 255, count: packet.width * packet.height * 4)
         for i in 0..<(packet.width * packet.height) {
@@ -139,6 +148,109 @@ final class RobotFaceDetector: NSObject, AVCaptureVideoDataOutputSampleBufferDel
     }
 }
 
+/// Apple's hand pose on one frame of the robot's video (owner, 15 Nov 2026: «riconosci i gesti»). Driven by one serial
+/// queue; the rules are RobotHandGesture's (RobotLiveCore.swift). nil: the analysis itself failed.
+final class RobotHandDetector: @unchecked Sendable {
+    /// When the picture shows no gesture, it is looked at again upside down (23 Nov 2026, owner: «non riconosce il pollice
+    /// in giù»; the app said «Nessuna mano» or «Vedo una mano, ma non abbastanza bene» for every thumb down, while a thumb
+    /// up was read at once: Apple's hand pose loses a hand upside down in the robot's small pictures). Turned over, a
+    /// thumb down is a thumb up (RobotHandGesture.upsideDown).
+    /// Second try (the same evening, «continua a trovarmi il pollice su e non il pollice in giù»): Vision also fits an
+    /// upright hand onto a hand upside down, and a thumb down was read as a thumb up. A thumb up is now looked at upside
+    /// down too, and the reading Vision is surer of wins (RobotHandGesture.thumbWay); both are shown in «Vedo: …».
+    func hand(in image: CGImage) -> (shape: RobotHandGesture.Shape?, x: Double?, seen: String?)? {
+        guard let first = hand(in: image, orientation: .up) else { return nil }
+        guard first.shape == nil || first.shape == .thumbsUp, let turned = hand(in: image, orientation: .down) else { return strip(first) }
+        let shape = RobotHandGesture.thumbWay(upright: first.shape, uprightSure: first.sure, turned: turned.shape, turnedSure: turned.sure)
+        guard shape == .thumbsDown else { return strip(first) }
+        let sure = String(format: "%.2f su %.2f", turned.sure, first.sure)
+        return (.thumbsDown, turned.x.map { 1 - $0 } ?? first.x, "Vedo: pollice in giù (mano letta capovolta, sicurezza \(sure)).")
+    }
+    private func strip(_ r: (shape: RobotHandGesture.Shape?, x: Double?, seen: String?, sure: Double)) -> (shape: RobotHandGesture.Shape?, x: Double?, seen: String?) { (r.shape, r.x, r.seen) }
+    /// `sure`: how sure Vision is of the hand (0…1), to choose between the picture upright and upside down.
+    private func hand(in image: CGImage, orientation: CGImagePropertyOrientation) -> (shape: RobotHandGesture.Shape?, x: Double?, seen: String?, sure: Double)? {
+        let request = VNDetectHumanHandPoseRequest(); request.maximumHandCount = 1
+        do { try VNImageRequestHandler(cgImage: image, orientation: orientation).perform([request]) } catch { return nil }
+        guard let observation = request.results?.first, let points = try? observation.recognizedPoints(.all) else { return (nil, nil, nil, 0) }
+        let sure = Double(observation.confidence)
+        // A joint Vision is not sure of is no joint: half a hand gives no gesture.
+        func at(_ joint: VNHumanHandPoseObservation.JointName) -> RobotHandGesture.Point? {
+            guard let point = points[joint], point.confidence >= 0.2 else { return nil }
+            return RobotHandGesture.Point(x: point.location.x, y: point.location.y)
+        }
+        guard let wrist = at(.wrist), let thumbMP = at(.thumbMP), let thumbIP = at(.thumbIP), let thumbTip = at(.thumbTip),
+              let indexMCP = at(.indexMCP), let indexPIP = at(.indexPIP), let indexTip = at(.indexTip),
+              let middleMCP = at(.middleMCP), let middlePIP = at(.middlePIP), let middleTip = at(.middleTip) else {
+            // Not enough of the hand for its shape, but where it is still counts for a wave: any fingertip, or the wrist.
+            let tips = [VNHumanHandPoseObservation.JointName.indexTip, .middleTip, .ringTip, .littleTip].compactMap { at($0)?.x }
+            return (nil, tips.isEmpty ? at(.wrist)?.x : tips.reduce(0, +) / Double(tips.count), "Vedo una mano, ma non abbastanza bene: avvicinala o fai più luce.", sure)
+        }
+        // Ring and little finger are the first Vision loses in a small picture (a fist seen from the side): when one is
+        // missing it is taken as doing what the middle finger does.
+        let ringPIP = at(.ringPIP) ?? middlePIP, ringTip = at(.ringTip) ?? middleTip, littlePIP = at(.littlePIP) ?? ringPIP, littleTip = at(.littleTip) ?? ringTip
+        let hand = RobotHandGesture.Hand(wrist: wrist, thumbMP: thumbMP, thumbIP: thumbIP, thumbTip: thumbTip, indexMCP: indexMCP, indexPIP: indexPIP, indexTip: indexTip,
+                                         middleMCP: middleMCP, middlePIP: middlePIP, middleTip: middleTip, ringPIP: ringPIP, ringTip: ringTip, littlePIP: littlePIP, littleTip: littleTip)
+        // Where the hand is: the tip of the middle finger, the part that moves most in a wave from the wrist.
+        let aspect = Double(image.width) / Double(max(1, image.height))
+        return (RobotHandGesture.shape(hand, aspect: aspect), middleTip.x, RobotHandGesture.reading(hand, aspect: aspect).map(RobotHandGesture.describe), sure)
+    }
+}
+
+/// A face's smile, whether it looks like the owner's saved pictures, and a thing shown to the camera, in one frame of
+/// the robot's video (owner, 15 Nov 2026). Apple's Vision only; the rules are RobotSight's (RobotLiveCore.swift).
+/// Driven by one serial queue. nil: the analysis itself failed.
+final class RobotSightDetector: @unchecked Sendable {
+    struct Seen { var hasFace = false; var smile: Double?; var distances: [Double]?; var print: Data?; var object: String?; var place: (x: Double, y: Double)? }
+    /// `prints`: the owner's saved pictures; `identity`: compare this face with them; `wantPrint`: give this face's
+    /// own picture back (for «Questo sono io»); `objects`: also look for a thing.
+    /// `place`: called at once with where the face is, before anything slower is looked at (the robot is waiting for
+    /// it to turn its head). `events` false: nothing but that place is wanted.
+    func look(at image: CGImage, prints: [Data], identity: Bool, wantPrint: Bool, objects: Bool, events: Bool = true, place: ((Double, Double) -> Void)? = nil) -> Seen? {
+        let handler = VNImageRequestHandler(cgImage: image, orientation: .up)
+        if let place {
+            // Only where the face is: the quickest of Vision's requests.
+            let quick = VNDetectFaceRectanglesRequest()
+            if (try? handler.perform([quick])) != nil, let box = quick.results?.filter({ $0.confidence >= 0.5 }).max(by: { $0.boundingBox.height < $1.boundingBox.height })?.boundingBox,
+               let at = RobotFollowHelp.target(minX: Double(box.minX), minY: Double(box.minY), width: Double(box.width), height: Double(box.height)) { place(at.x, at.y) }
+            if !events { return Seen() }
+        }
+        let faces = VNDetectFaceLandmarksRequest(), classify = VNClassifyImageRequest()
+        do { try handler.perform(objects ? [faces, classify] : [faces]) } catch { return nil }
+        var seen = Seen()
+        if let face = faces.results?.filter({ $0.confidence >= 0.5 }).max(by: { $0.boundingBox.height < $1.boundingBox.height }) {
+            seen.hasFace = true
+            seen.place = RobotFollowHelp.target(minX: Double(face.boundingBox.minX), minY: Double(face.boundingBox.minY), width: Double(face.boundingBox.width), height: Double(face.boundingBox.height))
+            if let lips = face.landmarks?.outerLips?.normalizedPoints, lips.count >= 4,
+               let left = lips.min(by: { $0.x < $1.x }), let right = lips.max(by: { $0.x < $1.x }), let top = lips.map(\.y).max(), let bottom = lips.map(\.y).min() {
+                seen.smile = RobotSight.smileScore(RobotSight.Mouth(left: .init(x: Double(left.x), y: Double(left.y)), right: .init(x: Double(right.x), y: Double(right.y)), top: Double(top), bottom: Double(bottom)))
+            }
+            if identity || wantPrint, let crop = Self.crop(image, face.boundingBox) {
+                let request = VNGenerateImageFeaturePrintRequest()
+                if (try? VNImageRequestHandler(cgImage: crop, orientation: .up).perform([request])) != nil, let print = request.results?.first {
+                    if wantPrint { seen.print = try? NSKeyedArchiver.archivedData(withRootObject: print, requiringSecureCoding: true) }
+                    if identity {
+                        seen.distances = prints.compactMap { data in
+                            guard let saved = try? NSKeyedUnarchiver.unarchivedObject(ofClass: VNFeaturePrintObservation.self, from: data) else { return nil }
+                            var distance: Float = 0
+                            return (try? saved.computeDistance(&distance, to: print)) != nil ? Double(distance) : nil
+                        }
+                    }
+                }
+            }
+        }
+        if objects { seen.object = RobotSight.object((classify.results ?? []).map { (label: $0.identifier, confidence: Double($0.confidence)) }) }
+        return seen
+    }
+    /// The face cut out of the frame, a fifth wider on every side. `box`: Vision's, 0…1 with y up.
+    private static func crop(_ image: CGImage, _ box: CGRect) -> CGImage? {
+        let w = CGFloat(image.width), h = CGFloat(image.height)
+        let rect = CGRect(x: box.minX * w, y: (1 - box.maxY) * h, width: box.width * w, height: box.height * h)
+            .insetBy(dx: -box.width * w * 0.2, dy: -box.height * h * 0.2).intersection(CGRect(x: 0, y: 0, width: w, height: h)).integral
+        guard rect.width >= 16, rect.height >= 16 else { return nil }
+        return image.cropping(to: rect)
+    }
+}
+
 /// How the phone is held, shared between the camera's thread and the page.
 final class RobotOrientationBox: @unchecked Sendable { var landscape = false; var tilt = 0.0 }
 
@@ -178,8 +290,99 @@ final class RobotCallPackerBox { var value = RobotCallAudio.Packer() }
     private let cameraQueue = DispatchQueue(label: "robottino.camera.lifecycle")
     private let analysisQueue = DispatchQueue(label: "robottino.face.robot")
     private var analysisBusy = false
+    /// «Riconosci i gesti» (15 Nov 2026): the hand in the robot's video, one frame at a time.
+    @Published private(set) var gesturing = false
+    @Published var gestureNote = ""
+    /// What the app sees of the hand right now (fingers, thumb): to understand a gesture that is not recognised.
+    @Published var gestureSeen = ""
+    var onGesture: ((RobotHandGesture.Kind) -> Void)?
+    /// Where the hand is across the picture, from every picture looked at for gestures (the Force following the hand).
+    var onHandAt: ((Double) -> Void)?
+    private let handDetector = RobotHandDetector()
+    private let gestureQueue = DispatchQueue(label: "robottino.gesture.robot")
+    private var gestureBusy = false, gestureWatch = RobotGestureWatch(), gestureGeneration = UUID()
+    func startGestures() { gestureGeneration = UUID(); gestureWatch = RobotGestureWatch(); gestureBusy = false; gesturing = true; gestureNote = "Attendo le immagini della camera del robot…" }
+    func stopGestures() { gesturing = false; gestureGeneration = UUID(); gestureBusy = false; gestureNote = ""; gestureSeen = "" }
+    /// «Riconosci viso e oggetti» (15 Nov 2026): a smile, the owner's face, a thing shown to the robot's camera.
+    @Published private(set) var sighting = false
+    @Published var sightNote = ""
+    /// The owner's saved pictures and name («Questo sono io»), set by RobotSharedLink; `enrolLeft`: pictures still to take.
+    var ownerPrints: [Data] = [], ownerName: String?
+    @Published var enrolLeft = 0
+    var onEnrolled: ((Data) -> Void)?
+    var onSight: ((RobotSight.Kind, String?) -> Void)?
+    /// Where the face is in a numbered frame of the robot's video (0…1, y from the top): for RobotFollowHelp.
+    var onFaceAt: ((UInt32, Double, Double) -> Void)?
+    /// false: only the face's place is wanted (helping the robot follow), no smile, owner or things.
+    var sightEvents = true
+    var exploringIdentity = false
+    private var exploreMatches = 0
+    private let sightDetector = RobotSightDetector()
+    private let sightQueue = DispatchQueue(label: "robottino.sight.robot")
+    private var sightBusy = false, sightWatch = RobotSightWatch(), sightGeneration = UUID(), sightSlowAt = 0.0, sightWho = "", sightThing = ""
+    func startSight() { sightGeneration = UUID(); sightWatch = RobotSightWatch(); sightBusy = false; sightSlowAt = 0; sightWho = ""; sightThing = ""; sighting = true; sightNote = "Attendo le immagini della camera del robot…" }
+    func stopSight() { exploreMatches = 0; sighting = false; sightGeneration = UUID(); sightBusy = false; sightNote = ""; enrolLeft = 0 }
+    private func sight(_ image: CGImage, frame: UInt32) {
+        sightBusy = true
+        let events = sightEvents
+        let generation = sightGeneration, detector = sightDetector, now = ProcessInfo.processInfo.systemUptime, prints = ownerPrints
+        // Who it is and what it is about once a second; the smile at every picture.
+        let slow = events && now - sightSlowAt >= 0.8; if slow { sightSlowAt = now }
+        let enrol = slow && enrolLeft > 0
+        sightQueue.async { [weak self] in
+            let seen = detector.look(at: image, prints: prints, identity: slow && !prints.isEmpty && !enrol, wantPrint: enrol, objects: slow, events: events) { x, y in
+                Task { @MainActor in if let self, self.sightGeneration == generation { self.onFaceAt?(frame, x, y) } }
+            }
+            Task { @MainActor in
+                guard let self, self.sightGeneration == generation else { return }
+                self.sightBusy = false
+                guard let seen else { self.sightNote = "Analisi del viso non disponibile."; return }
+                guard events else { self.sightNote = ""; return }
+                if enrol, let print = seen.print, self.enrolLeft > 0 { self.enrolLeft -= 1; self.onEnrolled?(print) }
+                if !seen.hasFace { _ = self.sightWatch.face(score: nil, at: now) }
+                else if let smile = seen.smile, let kind = self.sightWatch.face(score: smile, at: now) { self.onSight?(kind, nil) }
+                if slow {
+                    if let distances = seen.distances {
+                        let owner = RobotSight.isOwner(distances: distances), nearest = distances.min() ?? 9
+                        self.sightWho = String(format: owner ? "sembri tu (%.2f)" : "non ti riconosco (%.2f)", nearest)
+                        if self.exploringIdentity {
+                            self.exploreMatches = owner ? self.exploreMatches + 1 : 0
+                            if !owner || self.exploreMatches >= 2 {
+                                self.onSight?(owner ? .person : .stranger, owner ? self.ownerName : nil)
+                            }
+                        } else { self.exploreMatches = 0 }
+                        // Only the owner is told to the robot: a face that does not look like the saved ones gets no answer.
+                        if !self.exploringIdentity, let kind = self.sightWatch.person(owner: owner, at: now), kind == .person { self.onSight?(kind, self.ownerName) }
+                    } else if !seen.hasFace { self.exploreMatches = 0; if self.exploringIdentity { self.onSight?(.stranger, nil) }; self.sightWho = ""; _ = self.sightWatch.person(owner: nil, at: now) }
+                    self.sightThing = seen.object ?? ""
+                    // A thing is only shown here, in «Vedo: …» (owner, 15 Nov 2026: no messages on the robot's screen).
+                }
+                var parts: [String] = []
+                if seen.hasFace { parts.append(seen.smile.map { String(format: "viso, sorriso %.2f", $0) } ?? "viso") }
+                if !self.sightWho.isEmpty, seen.hasFace { parts.append(self.sightWho) }
+                if !self.sightThing.isEmpty { parts.append(self.sightThing) }
+                self.sightNote = parts.isEmpty ? "Vedo: nessun viso né oggetto che conosco." : "Vedo: " + parts.joined(separator: " · ") + "."
+            }
+        }
+    }
     func video(_ packet: RobotMediaPacket) {
         robotImage = UIImage.robotRGB(packet)
+        // A JPEG picture carries its own number (its sequence): the robot knows where its head was for it.
+        if sighting, !sightBusy, let image = robotImage?.cgImage { sight(image, frame: packet.kind == 8 ? packet.sequence : 0) }
+        if gesturing, !gestureBusy, let image = robotImage?.cgImage {
+            gestureBusy = true; let generation = gestureGeneration, detector = handDetector, now = ProcessInfo.processInfo.systemUptime
+            gestureQueue.async { [weak self] in
+                let seen = detector.hand(in: image)
+                Task { @MainActor in
+                    guard let self, self.gestureGeneration == generation else { return }
+                    self.gestureBusy = false
+                    guard let seen else { self.gestureNote = "Analisi della mano non disponibile."; return }
+                    if let x = seen.x { self.onHandAt?(x) }
+                    if let kind = self.gestureWatch.feed(seen.shape, x: seen.x, at: now) { self.gestureNote = "Gesto: \(RobotGestureWatch.label(kind))"; self.onGesture?(kind) }
+                    else if let read = seen.seen { self.gestureSeen = read } else { self.gestureSeen = "Nessuna mano: mostrala alla camera del robot." }
+                }
+            }
+        }
         guard robotMirroring || following, !analysisBusy, let image = robotImage?.cgImage, let detector else { return }
         analysisBusy = true; let generation = faceGeneration, follow = following, frameID = packet.frameID, free = canAnswer?() ?? true
         analysisQueue.async { [weak self] in
@@ -375,13 +578,14 @@ final class RobotCallPackerBox { var value = RobotCallAudio.Packer() }
         mirroring = false; robotMirroring = false; following = false; phoneFollowing = false; analysisBusy = false; faceNote = ""; faceGeneration = UUID(); detector = nil
         if let capture { cameraQueue.async { capture.stopRunning() } }; capture = nil
     }
-    func stopAll() { stopAudio(); stopFace(); robotImage = nil }
+    func stopAll() { stopAudio(); stopFace(); stopGestures(); stopSight(); robotImage = nil }
 }
 
 struct RobotLivePanel: View {
     @EnvironmentObject var store: RobotStore
     @Environment(\.scenePhase) private var scenePhase
-    @StateObject private var live = RobotLiveClient()
+    /// The link opened by «Collega al robot» at the top of Studio (RobotStudioPanel), shared with the rover keys.
+    @EnvironmentObject var live: RobotLiveClient
     @StateObject private var media = RobotPhoneMedia()
     @State private var faceSource = RobotFaceSource.robot
     @State private var cameraOn = false
@@ -402,15 +606,15 @@ struct RobotLivePanel: View {
                 Section("Collegamento reale · Robottino") {
                     Text(live.message)
                     if live.socketConnected { Button("Scollega") { stopEverything() } }
-                    else { Button("Collega al robot") { live.connect(token: store.token) }.disabled(store.token.isEmpty) }
+                    else { Text("Per collegarti torna a Studio e tocca «Collega al robot», in cima.").font(.caption) }
                     if live.status?.simulated == true { Label("Dispositivo virtuale di prova", systemImage: "testtube.2") }
-                    Text("Il canale richiede il MOD Robottino configurato. Il firmware di fabbrica non usa questo protocollo. Nessuna camera o microfono si avvia all’apertura.").font(.caption)
+                    Text("Nessuna camera o microfono si avvia all’apertura. Uscendo da questa pagina con video, chiamata, inseguimento, imitazione o immagine attivi il collegamento si chiude.").font(.caption)
                 }
                 Section("Segui il mio viso") {
                     Button(media.following ? "Ferma inseguimento" : "Avvia inseguimento") { run {
                         if media.following { media.stopFace(); try await live.command("track.stop") }
                         else {
-                            if cameraOn { try await live.command("camera.stop"); cameraOn = false; media.robotImage = nil }
+                            if cameraOn { try await live.command("camera.stop"); cameraOn = false; media.robotImage = nil; media.stopGestures() }
                             try await live.command("track.start"); media.startRobotFollow()
                         }
                     } }.disabled(!live.ready || live.status?.camera != true || live.status?.motionEnabled != true || media.mirroring || media.phoneFollowing || operationRunning)
@@ -442,7 +646,7 @@ struct RobotLivePanel: View {
                             try await live.command("mirror", values: ["yaw":0,"pitch":0,"leftEye":1,"rightEye":1,"mouth":0,"followHead":false])
                         } else if faceSource == .robot {
                             guard live.status?.camera == true else { throw RobotLiveError.rejected("camera del robot non disponibile") }
-                            if !cameraOn { try await live.command("camera.start"); cameraOn = true }
+                            if !cameraOn { try await live.command("camera.start", values: RobotLiveClient.cameraStart); cameraOn = true }
                             media.startRobotFace()
                         } else { try await media.startFace() }
                     } }.disabled(!live.ready || media.following || media.phoneFollowing || live.status?.hardwareVerified != true || live.status?.screen != true || (faceSource == .robot && live.status?.camera != true))
@@ -450,11 +654,24 @@ struct RobotLivePanel: View {
                     Text(faceSource == .robot ? "La camera del robot ti riprende; l’iPhone analizza il video ricevuto e rimanda le espressioni. La camera iPhone resta spenta. Servono iPhone aperto e collegamento attivo." : "La camera frontale dell’iPhone analizza il tuo viso. I suoi fotogrammi restano sul telefono.").font(.caption)
                     Text("Occhi e bocca usano i sei ritratti disponibili. Precisione e direzione della testa richiedono prove sul robot; il rilevamento non identifica la persona.").font(.caption)
                 }
+                Section("Gesti della mano") {
+                    Button(media.gesturing ? "Ferma i gesti" : "Riconosci i gesti") { run {
+                        if media.gesturing { media.stopGestures() }
+                        else {
+                            guard live.status?.camera == true else { throw RobotLiveError.rejected("camera del robot non disponibile") }
+                            if !cameraOn { try await live.command("camera.start", values: RobotLiveClient.cameraStart); cameraOn = true }
+                            media.startGestures()
+                        }
+                    } }.disabled(!live.ready || media.following || live.status?.hardwareVerified != true || live.status?.camera != true)
+                    if media.gesturing, !media.gestureNote.isEmpty { Text(media.gestureNote) }
+                    if media.gesturing, !media.gestureSeen.isEmpty { Text(media.gestureSeen).font(.caption) }
+                    Text("Pollice su: faccia felice. Pollice giù: faccia triste. Mano aperta ferma: stop a rover e ballo. Mano aperta che saluta: Robottino saluta. Due dita: balla. L’iPhone guarda il video del robot: tieni la mano a meno di un metro dalla camera, ben illuminata. Mai provato con il video vero del robot.").font(.caption)
+                }
                 Section("Video dal robot") {
                     if let image = media.robotImage { Image(uiImage: image).resizable().aspectRatio(contentMode: .fit).accessibilityLabel("Video ricevuto dal robot") }
                     else { Label("Nessun fotogramma ricevuto", systemImage: "video.slash") }
                     Button(cameraOn ? "Ferma video" : "Avvia video live") { run {
-                        if cameraOn && media.robotMirroring { media.stopFace(); try await live.command("mirror", values: ["yaw":0,"pitch":0,"leftEye":1,"rightEye":1,"mouth":0,"followHead":false]) }; try await live.command(cameraOn ? "camera.stop" : "camera.start"); cameraOn.toggle(); if !cameraOn { media.robotImage = nil }
+                        if cameraOn && media.robotMirroring { media.stopFace(); try await live.command("mirror", values: ["yaw":0,"pitch":0,"leftEye":1,"rightEye":1,"mouth":0,"followHead":false]) }; try await live.command(cameraOn ? "camera.stop" : "camera.start", values: cameraOn ? [:] : RobotLiveClient.cameraStart); cameraOn.toggle(); if !cameraOn { media.robotImage = nil; media.stopGestures() }
                     } }.disabled(!live.ready || live.status?.camera != true || media.following)
                     Text("Prototipo: 160×120, circa un fotogramma al secondo. Nessuna registrazione cloud.").font(.caption)
                 }
@@ -485,6 +702,8 @@ struct RobotLivePanel: View {
                 Section { Button("Ferma tutto e scollega", role: .destructive) { stopEverything() }; Text(media.note).font(.caption) }
             }.navigationTitle("Live Robottino")
         .onAppear {
+            // The app's own gestures (RobotSharedLink) give the video back: this page has its own.
+            RobotSharedLink.shared.liveOpened()
             live.onAudio = { data in media.receiveAudio(data) }; live.onVideo = { packet in media.video(packet) }
             live.onDisconnect = { media.stopAll(); cameraOn = false; screenOn = false; followHead = false; followBusy = false; aimBusy = false; lastAim = nil }
             media.onPCM = { data in if media.calling { live.media(kind: 3, payload: data) } }
@@ -494,6 +713,12 @@ struct RobotLivePanel: View {
                 Task { defer { mirrorBusy = false }; guard media.mirroring, media.faceSessionID == faceSession else { return }; do { try await live.command("mirror", values: ["yaw":pose.yaw,"pitch":pose.pitch,"leftEye":pose.leftEye,"rightEye":pose.rightEye,"mouth":pose.mouth,"followHead":followHead && live.status?.motionEnabled == true]) } catch { media.note = error.localizedDescription } }
             }
             // One command at a time, and only for a change of 2° or more: the newest angle wins.
+            media.onGesture = { kind in
+                Task { @MainActor in
+                    do { try await live.command("gesture", values: ["name": kind.rawValue]) }
+                    catch { media.gestureNote = "Gesto «\(RobotGestureWatch.label(kind))» non eseguito: \(error.localizedDescription)" }
+                }
+            }
             media.onAim = { yaw, pitch in
                 let next = (yaw: yaw, pitch: pitch)
                 guard !aimBusy, live.ready, media.phoneFollowing, RobotPhoneFollow.moved(next, from: lastAim) else { return }; aimBusy = true
@@ -511,7 +736,13 @@ struct RobotLivePanel: View {
                     do { try await live.command("track", values: RobotFaceFollow.values(frameID: frameID, x: x, y: y)); if media.following { media.faceNote = "Ti sto seguendo." } }
                     catch { if media.following { media.faceNote = "Il robot non ha accettato la posizione: \(error.localizedDescription)" } } }
             }
-        }.onDisappear { stopEverything(); live.onAudio = nil; live.onVideo = nil; live.onDisconnect = nil; media.onPCM = nil; media.onFace = nil; media.onTarget = nil; media.onAim = nil; media.canAnswer = nil }
+        }.onDisappear {
+            // The link belongs to Studio: it stays only if nothing here films, listens or is starting.
+            if RobotLiveLeave.keepsLink(camera: cameraOn, screen: screenOn, following: media.following, phoneFollowing: media.phoneFollowing, mirroring: media.mirroring, calling: media.calling, busy: operationRunning) {
+                operationRevision = UUID(); operationRunning = false; media.stopAll(); mirrorBusy = false; followBusy = false; aimBusy = false; lastAim = nil
+            } else { stopEverything() }
+            live.onAudio = nil; live.onVideo = nil; live.onDisconnect = nil; media.onPCM = nil; media.onFace = nil; media.onTarget = nil; media.onAim = nil; media.onGesture = nil; media.canAnswer = nil
+            RobotSharedLink.shared.liveClosed() }
             .onChange(of: scenePhase) { _, phase in if phase == .background { stopEverything() } }
             .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.interruptionNotification)) { _ in if media.calling { stopEverything() } }
             .onChange(of: photo) { _, selection in
@@ -537,6 +768,154 @@ struct RobotLivePanel: View {
     // Same directions as the Test page joystick.
     private func move() { run { try await live.command("motion", values: RobotHeadJoystick.command(yaw: Int(yaw), pitch: Int(pitch))) } }
     private func stopEverything() { operationRevision = UUID(); operationRunning = false; media.stopAll(); live.disconnect(); cameraOn = false; screenOn = false; mirrorBusy = false; followBusy = false; aimBusy = false; lastAim = nil }
+}
+
+/// «Esplora» (owner, 23 Nov 2026), above the rover keys, on the same link: one key that starts or stops (RobotExploreKey).
+struct RobotExplorePad: View {
+    @ObservedObject var live: RobotLiveClient
+    @State private var busy = false
+    @State private var note = ""
+    var body: some View {
+        let exploring = live.status?.exploring == true, rover = live.status?.rover == true
+        Section("Esplora") {
+            Button {
+                busy = true; note = ""
+                Task { @MainActor in
+                    defer { busy = false }
+                    do { try await live.command("explore", values: RobotExploreKey.command(exploring: exploring)) }
+                    catch { note = RobotExploreKey.refused(error) }
+                }
+            } label: {
+                Label(RobotExploreKey.title(exploring: exploring), systemImage: exploring ? "stop.circle" : "binoculars")
+                    .frame(maxWidth: .infinity)
+            }.buttonStyle(.borderedProminent).disabled(busy)
+            Text(note.isEmpty ? RobotExploreKey.note(exploring: exploring, rover: rover) : note).font(.caption)
+        }.disabled(!live.ready || live.status?.hardwareVerified != true)
+    }
+}
+
+/// The rover keys (owner, 15 Nov 2026: after the Studio menu), on the link opened at the top of Studio.
+struct RobotRoverPad: View {
+    @ObservedObject var live: RobotLiveClient
+    @State private var roverMove: RobotRoverKeys.Move?
+    @State private var roverTask: Task<Void, Never>?
+    @State private var roverNote = ""
+    /// After a refused move, nothing more is sent until the finger is lifted (no stream of failing commands).
+    @State private var roverBlocked = false
+    @State private var knob = CGSize.zero
+    /// True only while a finger is on the stick or on a key. A gesture state goes back to false by itself also when
+    /// the gesture is cancelled (15 Nov 2026, owner: «lasciando il dito si deve fermare»: inside the Studio list a
+    /// vertical drag could be taken over by the page's scrolling, onEnded never came, and the knob stayed out with
+    /// the moves still being sent). Going back to false always recentres the knob and stops.
+    @GestureState private var stickHeld = false
+    @GestureState private var keyHeld = false
+    private let stickSize: CGFloat = 190, knobSize: CGFloat = 70
+    private var travel: CGFloat { (stickSize - knobSize) / 2 }
+    var body: some View {
+        Section("Rover") {
+            stick.frame(maxWidth: .infinity).padding(.vertical, 6)
+            HStack(spacing: 10) {
+                roverKey(.left, text: "Di lato")
+                roverKey(.stop, text: "Ferma")
+                roverKey(.right, text: "Di lato")
+            }.frame(maxWidth: .infinity)
+            HStack(spacing: 10) { gripKey(.gripOpen); gripKey(.gripHalf); gripKey(.gripClose) }.frame(maxWidth: .infinity)
+            if !roverNote.isEmpty { Text(roverNote) }
+        }.disabled(!live.ready || live.status?.hardwareVerified != true)
+            .onDisappear { knob = .zero; stopRover() }
+            .onChange(of: stickHeld) { _, held in if !held { released() } }
+            .onChange(of: keyHeld) { _, held in if !held { released() } }
+            .sensoryFeedback(.selection, trigger: roverMove)
+    }
+    /// The round stick: drag the knob, the direction it points to is the move (RobotRoverStick); lift and it springs
+    /// back to the centre and the rover stops.
+    private var stick: some View {
+        ZStack {
+            Circle().fill(Color.secondary.opacity(0.12))
+            Circle().strokeBorder(Color.secondary.opacity(0.25), lineWidth: 1)
+            stickArrow(.forward, x: 0, y: -1); stickArrow(.back, x: 0, y: 1)
+            stickArrow(.turnLeft, x: -1, y: 0); stickArrow(.turnRight, x: 1, y: 0)
+            Circle().fill(roverMove == nil || roverMove == .left || roverMove == .right || roverMove == .stop ? Color.secondary.opacity(0.45) : Color.accentColor)
+                .frame(width: knobSize, height: knobSize).shadow(radius: 3, y: 2)
+                .offset(knob)
+        }
+        .frame(width: stickSize, height: stickSize).contentShape(Circle())
+        // High priority: the stick wins over the scrolling of the Studio list.
+        .highPriorityGesture(DragGesture(minimumDistance: 0).updating($stickHeld) { _, held, _ in held = true }.onChanged { value in
+            let dx = value.location.x - stickSize / 2, dy = value.location.y - stickSize / 2
+            let length = max(1, (dx * dx + dy * dy).squareRoot()), scale = min(1, travel / length)
+            knob = CGSize(width: dx * scale, height: dy * scale)
+            guard !roverBlocked else { return }
+            let move = RobotRoverStick.move(dx: dx, dy: dy, travel: travel)
+            if move != roverMove { if let move { startRover(move) } else { stopRover() } }
+        }.onEnded { _ in released() })
+        .accessibilityElement().accessibilityLabel("Joystick del rover")
+        .accessibilityHint("Trascina: su avanti, giù indietro, ai lati gira sul posto.")
+        .accessibilityActions {
+            ForEach([RobotRoverKeys.Move.forward, .back, .turnLeft, .turnRight], id: \.self) { move in
+                Button(RobotRoverKeys.label(move)) { Task { try? await live.command("rover", values: RobotRoverKeys.command(move)) } }
+            }
+        }
+    }
+    private func stickArrow(_ move: RobotRoverKeys.Move, x: CGFloat, y: CGFloat) -> some View {
+        Image(systemName: RobotRoverKeys.symbol(move)).font(.title3.weight(.semibold))
+            .foregroundStyle(roverMove == move ? Color.accentColor : Color.secondary)
+            .offset(x: x * (stickSize / 2 - 20), y: y * (stickSize / 2 - 20))
+            .accessibilityHidden(true)
+    }
+    /// One rover key: held down, a short move every RobotRoverKeys.repeatMs; lifted, a stop.
+    private func roverKey(_ move: RobotRoverKeys.Move, text: String) -> some View {
+        VStack(spacing: 2) { Image(systemName: RobotRoverKeys.symbol(move)).font(.title3); Text(text).font(.caption2) }
+            .frame(width: 84, height: 52).background(roverMove == move ? Color.accentColor.opacity(0.35) : Color.secondary.opacity(0.15), in: RoundedRectangle(cornerRadius: 10))
+            .accessibilityLabel(RobotRoverKeys.label(move)).accessibilityAddTraits(.isButton)
+            .highPriorityGesture(DragGesture(minimumDistance: 0).updating($keyHeld) { _, held, _ in held = true }.onChanged { _ in if !roverBlocked, roverMove != move { startRover(move) } }.onEnded { _ in released() })
+    }
+    /// One key of the gripper (owner, 15 Nov 2026): a tap, one command; the wheels are not touched.
+    private func gripKey(_ move: RobotRoverKeys.Move) -> some View {
+        Button {
+            roverNote = ""
+            Task { @MainActor in
+                do { try await live.command("rover", values: RobotRoverKeys.command(move)) }
+                catch { roverNote = "Il robot non ha mosso la pinza: \(error.localizedDescription). Controlla che il rover sia acceso dal menu del robot." }
+            }
+        } label: {
+            VStack(spacing: 2) { Image(systemName: RobotRoverKeys.symbol(move)).font(.title3); Text(RobotRoverKeys.label(move)).font(.caption2) }
+                .frame(width: 84, height: 52).background(Color.secondary.opacity(0.15), in: RoundedRectangle(cornerRadius: 10))
+        }.buttonStyle(.plain).accessibilityLabel(move == .gripOpen ? "Apri pinza" : move == .gripHalf ? "Chiudi poco la pinza" : "Chiudi tutta la pinza")
+    }
+    /// The finger is off (lifted, or the gesture cancelled): knob back to the centre, rover stopped.
+    private func released() {
+        withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) { knob = .zero }
+        roverBlocked = false; stopRover()
+    }
+    private func startRover(_ move: RobotRoverKeys.Move) {
+        roverTask?.cancel(); roverMove = move; roverNote = ""
+        roverTask = Task { @MainActor in
+            var refused = 0, moved = false
+            while !Task.isCancelled, roverMove == move {
+                // The stop always goes, whatever is waiting (code review, 19 Nov 2026: with two commands waiting
+                // «Ferma» sent nothing and said nothing).
+                if move == .stop || live.pendingCount < 2 {
+                    do { try await live.command("rover", values: RobotRoverKeys.command(move)); moved = true }
+                    catch {
+                        if RobotRoverKeys.retries(move, refused: refused, moved: moved) { refused += 1; roverNote = "Aspetto che la testa guardi davanti…" }
+                        else { roverNote = "Il robot non ha mosso il rover: \(error.localizedDescription). Può esserci un ostacolo davanti, la testa girata, il robot sollevato o il rover spento: guarda lo schermo del robot."; roverMove = nil; roverBlocked = true; return }
+                    }
+                    if moved, refused > 0 { refused = 0; roverNote = "" }
+                }
+                if move == .stop { roverMove = nil; return }
+                try? await Task.sleep(nanoseconds: UInt64(RobotRoverKeys.repeatMs) * 1_000_000)
+            }
+        }
+    }
+    private func stopRover() {
+        let was = roverMove; roverTask?.cancel(); roverTask = nil; roverMove = nil
+        guard was != nil, was != .stop, live.ready else { return }
+        Task { @MainActor in
+            do { try await live.command("rover", values: RobotRoverKeys.command(.stop)) }
+            catch { roverNote = "Il robot non ha confermato lo stop del rover: \(error.localizedDescription). Tocca «Ferma» di nuovo." }
+        }
+    }
 }
 
 // MARK: - Face following during a conversation with the robot
@@ -1027,23 +1406,29 @@ final class RobotOnce<T: Sendable>: @unchecked Sendable {
 @MainActor final class RobotDanceSender: ObservableObject {
     @Published private(set) var running = false
     @Published private(set) var message = "Serve il robot acceso, verificato, calibrato e con i movimenti attivati sul robot."
-    private let client = RobotLiveClient()
+    private let own = RobotLiveClient()
+    private var client: RobotLiveClient
     private var task: Task<Void, Never>?
-    /// The relay link must stay open: closing it stops the dance on the robot.
-    func play(_ dance: StudioDance, token: String) {
+    init() { client = own }
+    /// The relay link must stay open: closing it stops the dance on the robot. When Studio's link is open
+    /// («Collega al robot», `shared`) the dance goes on it, since the relay takes one app at a time, and that link
+    /// stays open afterwards; otherwise the sender opens its own and closes it at the end.
+    func play(_ dance: StudioDance, token: String, shared: RobotLiveClient? = nil) {
         guard !running else { return }
         do { try dance.validate() } catch { message = error.localizedDescription; return }
         running = true; message = "Collegamento al robot…"
         let steps: [[String: Any]] = dance.frames.map { ["yaw": $0.yaw, "pitch": $0.pitch, "durationMs": $0.durationMs, "expression": $0.expression.rawValue] }
+        let link = shared.flatMap { $0.socketConnected ? $0 : nil } ?? own, owned = link === own
+        client = link
         task = Task { [weak self] in
             guard let self else { return }
-            defer { self.client.disconnect(); self.running = false; self.task = nil }
-            self.client.connect(token: token)
+            defer { if owned { link.disconnect() }; self.running = false; self.task = nil }
+            if owned { link.connect(token: token) }
             do {
-                for _ in 0..<50 where !self.client.ready { try await Task.sleep(nanoseconds: 100_000_000) }
-                guard self.client.ready, let status = self.client.status else { throw RobotLiveError.offline }
+                for _ in 0..<50 where !link.ready { try await Task.sleep(nanoseconds: 100_000_000) }
+                guard link.ready, let status = link.status else { throw RobotLiveError.offline }
                 guard status.hardwareVerified, status.motionEnabled else { throw RobotLiveError.rejected("movimenti non abilitati sul robot") }
-                try await self.client.command("dance", values: ["steps": steps])
+                try await link.command("dance", values: ["steps": steps])
                 let virtual = status.simulated == true
                 self.message = virtual ? "Il robot virtuale ha iniziato la danza." : "Confermato: il robot ha iniziato la danza. La luce dei passi resta solo nell’anteprima."
                 try await Task.sleep(nanoseconds: UInt64(dance.durationMs + 1000) * 1_000_000)
@@ -1060,7 +1445,11 @@ final class RobotOnce<T: Sendable>: @unchecked Sendable {
         message = "Invio STOP al robot…"
         Task {
             do { try await client.command("stop"); message = "Confermato: il robot ha fermato la danza." }
-            catch { message = "STOP non confermato: il collegamento viene chiuso e il robot interrompe la danza." }
+            catch {
+                message = "STOP non confermato: il collegamento viene chiuso e il robot interrompe la danza."
+                // Studio's link is not closed by the dance task: close it here, as the message says.
+                if client !== own { client.disconnect() }
+            }
             task?.cancel()
         }
     }
@@ -1135,8 +1524,14 @@ final class RobotOnce<T: Sendable>: @unchecked Sendable {
         central.connect(peripheral)
     }
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) { peripheral.discoverServices([service]) }
-    func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) { finish("Collegamento Bluetooth non riuscito. Riprova vicino al robot.") }
+    // Only the robot of this sending counts: a late end of a sending already cancelled must not stop the new one
+    // (code review, 19 Nov 2026).
+    func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
+        guard peripheral === self.peripheral else { return }
+        finish("Collegamento Bluetooth non riuscito. Riprova vicino al robot.")
+    }
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
+        guard peripheral === self.peripheral else { return }
         if running { finish("Il robot ha chiuso il Bluetooth prima di confermare. Riapri Impostazioni sul robot e riprova.") }
     }
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
@@ -1170,7 +1565,13 @@ final class RobotOnce<T: Sendable>: @unchecked Sendable {
         writeNext()
     }
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
-        guard let data = characteristic.value, let (prop, value) = RobotWiFiBluetooth.notification(data) else { return }
+        guard let data = characteristic.value else { return }
+        // The robot does not send the password back: after a write it says «saved», and that is the confirmation.
+        if let secret = RobotWiFiBluetooth.secret(data) {
+            if writing, secret.saved, secret.prop == "wifi.password" { confirmed.insert(secret.prop); if confirmed.count == 2 { done() } }
+            return
+        }
+        guard let (prop, value) = RobotWiFiBluetooth.notification(data) else { return }
         if !writing { initial[prop] = value; return }
         if (prop == "wifi.ssid" && value == ssid) || (prop == "wifi.password" && value == password) { confirmed.insert(prop) }
         if confirmed.count == 2 { done() }

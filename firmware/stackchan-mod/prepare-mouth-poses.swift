@@ -1,9 +1,11 @@
 // Robot mouth poses (9 Nov 2026). On the robot the whole 320×240 picture was swapped at every mouth change:
 // a full-screen redraw, three positions only, so the lips moved in jerks. The talking pictures differ from
 // the serene face only around the mouth, so the robot now draws the serene face once and changes only a
-// small picture of the mouth over it, in four openings. Each opening is exactly what the iPhone app shows
-// at that openness (RobotLive.swift: talk-small faded in over 0.03…0.33, talk-open over 0.35…0.80):
-//   1 = openness .18 (half talk-small), 2 = .35 (talk-small), 3 = .58 (talk-open at 51%), 4 = .80 (talk-open).
+// small picture of the mouth over it. Eight openings since 12 Nov 2026 (owner: «migliora ancora il movimento della
+// bocca… è a scatti»): with four, each change was a big step. They are the fades the iPhone app shows between the
+// serene face, talk-small and talk-open, in equal steps:
+//   1…3 = talk-small at 25, 50, 75%, 4 = talk-small, 5…7 = talk-open over talk-small at 25, 50, 75%, 8 = talk-open
+//   (openness .09, .18, .265, .35, .465, .58, .69, .80: portrait-state.js MOUTH_LEVELS).
 // The white robot is a drawing with sharp outlines: a fade shows two mouths at once, so it keeps only its
 // two drawn mouths (2 = talk-small, 4 = talk-open; portrait-state.js MOUTH_IMAGES).
 // Writes assets/<style>mouth-N.png (no transparency: drawn fast) and prints the box of each style for
@@ -62,8 +64,9 @@ for (style, prefix) in [("portrait", "girl-"), ("white", "white-"), ("redhead", 
         }
     } }
     let faded = style != "white"
-    let poses = [(1, faded ? mix(neutral, small, 0.5) : nil), (2, small), (3, faded ? mix(small, open, (0.58 - 0.35) / 0.45) : nil), (4, open)]
-        .compactMap { index, pixels in pixels.map { (index, image($0, box)) } }
+    let poses: [(Int, CGImage)] = faded
+        ? (1...8).map { n in (n, image(n <= 4 ? mix(neutral, small, Double(n) / 4) : mix(small, open, Double(n - 4) / 4), box)) }
+        : [(2, image(small, box)), (4, image(open, box))]
     for (index, pose) in poses { write(pose, assets + "\(prefix)mouth-\(index).png") }
     print("\(style): {left:\(Int(box.minX)),top:\(Int(box.minY)),width:\(Int(box.width)),height:\(Int(box.height))}  outside the box up to \(outside), blink differs up to \(blinkDiff) inside, translucent pixels \(translucent)")
     check.append((style, [image(neutral, box)] + poses.map { $0.1 }))

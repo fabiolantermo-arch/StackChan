@@ -168,6 +168,162 @@ final class BackendProtocol: URLProtocol {
         precondition(RobotPhoneFollow.moved((yaw: 10, pitch: -5), from: nil) && !RobotPhoneFollow.moved((yaw: 11, pitch: -5), from: (yaw: 10, pitch: -5)) && RobotPhoneFollow.moved((yaw: 12, pitch: -5), from: (yaw: 10, pitch: -5)) && RobotPhoneFollow.moved((yaw: 10, pitch: -7), from: (yaw: 10, pitch: -5)), "Only changes of 2° or more are sent")
         precondition(RobotHeadJoystick.command(yaw: 30, pitch: -10) == ["yaw": 30, "pitch": -10] && RobotHeadJoystick.command(yaw: -90, pitch: 0) == ["yaw": -90, "pitch": 0], "The robot reverses its own yaw servo (MOD YAW_SERVO): the angles go as they are")
         print("PASS Test page joystick: real head up to 90° sideways and 85° up, never down")
+        // The rover keys: the robot's own directions, a short move each (the robot stops by itself), a stop on release.
+        let roverForward = RobotRoverKeys.command(.forward), roverStop = RobotRoverKeys.command(.stop)
+        precondition(RobotRoverKeys.retries(.forward, refused: 0, moved: false) && RobotRoverKeys.retries(.forward, refused: 2, moved: false) && !RobotRoverKeys.retries(.forward, refused: 3, moved: false) && !RobotRoverKeys.retries(.forward, refused: 0, moved: true) && !RobotRoverKeys.retries(.back, refused: 0, moved: false), "«Avanti» refused at the very start is tried again a few times (head still, fresh reading); nothing else")
+        precondition(roverForward["move"] as? String == "forward" && roverForward["ms"] as? Int == 500 && roverStop["move"] as? String == "stop" && roverStop["ms"] as? Int == 200, "Short moves, a stop within the relay's 200…1500 ms")
+        precondition(RobotRoverKeys.Move.allCases.map(\.rawValue) == ["forward","back","left","right","turnLeft","turnRight","stop","gripOpen","gripHalf","gripClose"], "The same moves as the relay and the MOD")
+        let gripOpen = RobotRoverKeys.command(.gripOpen), gripClose = RobotRoverKeys.command(.gripClose)
+        precondition(gripOpen["move"] as? String == "gripOpen" && gripClose["move"] as? String == "gripClose" && gripOpen["ms"] as? Int == 200 && RobotRoverKeys.command(.gripHalf)["move"] as? String == "gripHalf" && RobotRoverKeys.once(.gripHalf) && RobotRoverKeys.once(.gripClose) && RobotRoverKeys.once(.stop) && !RobotRoverKeys.once(.forward), "The gripper: one command a tap, with the short time the relay asks for")
+        precondition(RobotRoverKeys.label(.gripOpen) == "Apri pinza" && RobotRoverKeys.label(.gripHalf) == "Chiudi poco" && RobotRoverKeys.label(.gripClose) == "Chiudi tutto", "The gripper's keys")
+        precondition(RobotRoverKeys.repeatMs < RobotRoverKeys.moveMs, "Held down, the next move arrives before the robot stops the last one")
+        print("PASS rover keys: the robot's own directions, short moves repeated while held, a stop on release")
+        // Hand gestures: which fingers are stretched (points as Vision gives them: 0…1, y up), then the gesture, once.
+        typealias HP = RobotHandGesture.Point
+        func hand(fingers: [Bool], thumb: HP, up: Double = 1) -> RobotHandGesture.Hand {
+            // Wrist at the bottom (or at the top with up = −1), four fingers side by side; a bent finger's tip comes back toward the palm.
+            let wy = up > 0 ? 0.2 : 0.8, y = { (d: Double) in wy + d * up }
+            func tip(_ out: Bool) -> Double { y(out ? 0.6 : 0.22) }
+            return RobotHandGesture.Hand(wrist: HP(x: 0.5, y: wy), thumbMP: HP(x: 0.42, y: y(0.22)), thumbIP: HP(x: (0.42 + thumb.x) / 2, y: (y(0.22) + thumb.y) / 2), thumbTip: thumb,
+                indexMCP: HP(x: 0.44, y: y(0.3)), indexPIP: HP(x: 0.44, y: y(0.4)), indexTip: HP(x: 0.44, y: tip(fingers[0])),
+                middleMCP: HP(x: 0.5, y: y(0.3)), middlePIP: HP(x: 0.5, y: y(0.4)), middleTip: HP(x: 0.5, y: tip(fingers[1])),
+                ringPIP: HP(x: 0.55, y: y(0.4)), ringTip: HP(x: 0.55, y: tip(fingers[2])), littlePIP: HP(x: 0.6, y: y(0.38)), littleTip: HP(x: 0.6, y: tip(fingers[3])))
+        }
+        let tucked = HP(x: 0.45, y: 0.47)
+        precondition(RobotHandGesture.shape(hand(fingers: [true, true, true, true], thumb: HP(x: 0.3, y: 0.5))) == .palm && RobotHandGesture.shape(hand(fingers: [true, true, true, true], thumb: tucked)) == .palm, "Four fingers stretched: an open hand, wherever the thumb is")
+        precondition(RobotHandGesture.shape(hand(fingers: [true, true, false, false], thumb: tucked)) == .victory, "Index and middle only: two fingers")
+        precondition(RobotHandGesture.shape(hand(fingers: [false, false, false, false], thumb: HP(x: 0.40, y: 0.72))) == .thumbsUp, "A fist with the thumb pointing up")
+        precondition(RobotHandGesture.shape(hand(fingers: [false, false, false, false], thumb: HP(x: 0.40, y: 0.28), up: -1)) == .thumbsDown, "The same hand turned over: thumb down")
+        precondition(RobotHandGesture.shape(hand(fingers: [false, false, false, false], thumb: tucked)) == nil && RobotHandGesture.shape(hand(fingers: [false, false, false, false], thumb: HP(x: 0.2, y: 0.44))) == nil, "A plain fist, or a thumb pointing sideways, is no gesture")
+        precondition(RobotHandGesture.shape(hand(fingers: [true, false, false, false], thumb: tucked)) == nil && RobotHandGesture.shape(hand(fingers: [true, true, true, false], thumb: tucked)) == nil, "One finger or three: no gesture")
+        var tiny = hand(fingers: [true, true, true, true], thumb: tucked); tiny.middleMCP = HP(x: 0.5, y: 0.21)
+        precondition(RobotHandGesture.shape(tiny) == nil && RobotHandGesture.Kind.allCases.map(\.rawValue) == ["thumbsUp", "thumbsDown", "palm", "wave", "victory"], "Too small to tell; the same names as the relay and the MOD")
+        // First try on the robot: the thumb down was not recognised. A thumb that leans (the forearm comes in from the side) still points down; one lying flat does not.
+        precondition(RobotHandGesture.shape(hand(fingers: [false, false, false, false], thumb: HP(x: 0.30, y: 0.28), up: -1)) == .thumbsDown && RobotHandGesture.shape(hand(fingers: [false, false, false, false], thumb: HP(x: 0.30, y: 0.72))) == .thumbsUp, "A leaning thumb")
+        precondition(RobotHandGesture.shape(hand(fingers: [false, false, false, false], thumb: HP(x: 0.18, y: 0.5), up: -1)) == nil, "A thumb lying sideways is neither")
+        let fistDown = RobotHandGesture.reading(hand(fingers: [false, false, false, false], thumb: HP(x: 0.40, y: 0.28), up: -1)), open = RobotHandGesture.reading(hand(fingers: [true, true, true, true], thumb: tucked))
+        precondition(fistDown.map(RobotHandGesture.describe) == "Vedo: nessun dito disteso, pollice in giù." && open.map(RobotHandGesture.describe) == "Vedo: indice, medio, anulare, mignolo, pollice chiuso.", "What the app says it sees of the hand")
+        var watch = RobotGestureWatch()
+        precondition(watch.feed(.thumbsUp, x: 0.5, at: 0) == nil && watch.feed(.thumbsUp, x: 0.5, at: 0.1) == nil && watch.feed(.thumbsUp, x: 0.5, at: 0.2) == .thumbsUp, "Three pictures in a row: said")
+        precondition(watch.feed(.thumbsUp, x: 0.5, at: 0.3) == nil && watch.feed(.thumbsUp, x: 0.5, at: 1.0) == nil && watch.feed(.thumbsUp, x: 0.5, at: 2.9) == nil, "Once: nothing more for 3 s")
+        precondition(watch.feed(.victory, x: 0.5, at: 3.3) == nil && watch.feed(.victory, x: 0.5, at: 3.4) == nil && watch.feed(nil, x: 0.5, at: 3.5) == nil && watch.feed(.victory, x: 0.5, at: 3.6) == nil && watch.feed(.victory, x: 0.5, at: 3.7) == nil && watch.feed(.victory, x: 0.5, at: 3.8) == .victory, "A picture without the gesture starts the count again")
+        var still = RobotGestureWatch(), stops: [RobotHandGesture.Kind?] = []
+        for i in 0...10 { stops.append(still.feed(.palm, x: 0.5 + (i % 2 == 0 ? 0.01 : -0.01), at: Double(i) * 0.1)) }
+        precondition(stops.prefix(9).allSatisfy { $0 == nil } && stops[9] == .palm, "An open hand held still for nine tenths of a second: stop")
+        precondition(still.feed(.palm, x: 0.5, at: 1.5) == nil && still.feed(.palm, x: 0.5, at: 2.5) == nil, "After a stop a short wait, then the count starts again")
+        // First try on the robot: a wave was taken for a still hand. A wave with pictures where the moving hand is not found is still a wave.
+        var blurred = RobotGestureWatch(), seenWave: [RobotHandGesture.Kind] = []
+        for (i, x) in [0.3, nil, 0.42, 0.54, nil, 0.42, 0.3, nil, 0.42, 0.54].enumerated() { if let kind = blurred.feed(x == nil ? nil : .palm, x: x, at: Double(i) * 0.12) { seenWave.append(kind) } }
+        precondition(seenWave == [.wave], "Blurred pictures in the middle of a wave do not end it, and it is not a stop")
+        var held = RobotGestureWatch(), raisedHand: [RobotHandGesture.Kind] = []
+        for (i, x) in [0.50, 0.50, 0.51, 0.50, 0.50, 0.60, 0.50, 0.40, 0.50, 0.60].enumerated() { if let kind = held.feed(.palm, x: x, at: Double(i) * 0.12) { raisedHand.append(kind) } }
+        precondition(raisedHand == [.wave], "A hand that is raised, then waves before nine tenths of a second: the wave, no stop first")
+        var waving = RobotGestureWatch(), hello: [RobotHandGesture.Kind] = []
+        for (i, x) in [0.3, 0.38, 0.46, 0.54, 0.46, 0.38, 0.3, 0.38, 0.46, 0.54].enumerated() { if let kind = waving.feed(.palm, x: x, at: Double(i) * 0.1) { hello.append(kind) } }
+        precondition(hello == [.wave] && RobotGestureWatch.turns([0.3, 0.5, 0.3, 0.5]) == 2 && RobotGestureWatch.turns([0.3, 0.33, 0.3, 0.33]) == 0, "An open hand going from side to side and back: a wave, not a stop")
+        // Second try: «non riconosce bene il saluto». In a wave many pictures do not read as an open hand; the hand's place still does.
+        var mixed = RobotGestureWatch(), mixedWave: [RobotHandGesture.Kind] = []
+        let frames: [(RobotHandGesture.Shape?, Double)] = [(.palm, 0.30), (nil, 0.40), (.victory, 0.50), (.palm, 0.56), (nil, 0.46), (nil, 0.36), (.palm, 0.30), (nil, 0.40), (nil, 0.50)]
+        for (i, frame) in frames.enumerated() { if let kind = mixed.feed(frame.0, x: frame.1, at: Double(i) * 0.12) { mixedWave.append(kind) } }
+        precondition(mixedWave == [.wave], "Three open-hand pictures among blurred ones, the hand going across and back twice: a wave")
+        var fist = RobotGestureWatch(), fistWave: [RobotHandGesture.Kind] = []
+        for (i, x) in [0.30, 0.42, 0.54, 0.42, 0.30, 0.42, 0.54, 0.42, 0.30].enumerated() { if let kind = fist.feed(nil, x: x, at: Double(i) * 0.12) { fistWave.append(kind) } }
+        precondition(fistWave.isEmpty, "A hand that is never open, moved from side to side, is no wave")
+        // Third try (23 Nov 2026): few pictures while the head follows. One swing out and back, pictures 0.4-1.2 s apart: a wave.
+        var sparse = RobotGestureWatch(), sparseWave: [RobotHandGesture.Kind] = []
+        for (at, x) in [(0.0, 0.40), (0.4, 0.52), (1.6, 0.40)] { if let kind = sparse.feed(.palm, x: x, at: at) { sparseWave.append(kind) } }
+        precondition(sparseWave == [.wave], "Three open-hand pictures, across and back once, with a gap of 1.2 s: a wave")
+        var steady = RobotGestureWatch(), steadyKinds: [RobotHandGesture.Kind] = []
+        for (at, x) in [(0.0, 0.50), (0.4, 0.52), (0.8, 0.50), (1.2, 0.51)] { if let kind = steady.feed(.palm, x: x, at: at) { steadyKinds.append(kind) } }
+        precondition(!steadyKinds.contains(.wave), "An open hand that hardly moves is no wave")
+        // Fourth try (23 Nov 2026): «continuo a vedere la mano aperta, ma non pollice su, pollice giù». An open hand raised, then closed to a thumb up while it moves a little: the thumb, not a wave.
+        var raisedThumb = RobotGestureWatch(), thumbKinds: [RobotHandGesture.Kind] = []
+        let thumbFrames: [(RobotHandGesture.Shape?, Double)] = [(.palm, 0.40), (.palm, 0.46), (.palm, 0.52), (nil, 0.50), (.thumbsUp, 0.44), (.thumbsUp, 0.40), (.thumbsUp, 0.41)]
+        for (i, frame) in thumbFrames.enumerated() { if let kind = raisedThumb.feed(frame.0, x: frame.1, at: Double(i) * 0.25) { thumbKinds.append(kind) } }
+        precondition(thumbKinds == [.thumbsUp], "An open hand that closes to a thumb, moving a little: the thumb, no wave first")
+        var downThumb = RobotGestureWatch(), downKinds: [RobotHandGesture.Kind] = []
+        for (i, frame) in [(RobotHandGesture.Shape?.some(.palm), 0.50), (.palm, 0.56), (.thumbsDown, 0.62), (.palm, 0.50), (.thumbsDown, 0.50), (.thumbsDown, 0.51), (.thumbsDown, 0.50)].enumerated() { if let kind = downThumb.feed(frame.0, x: frame.1, at: Double(i) * 0.25) { downKinds.append(kind) } }
+        precondition(downKinds == [.thumbsDown], "A thumb down among open-hand pictures, back and forth: the thumb down")
+        precondition(RobotHandGesture.upsideDown(.thumbsUp) == .thumbsDown && RobotHandGesture.upsideDown(.thumbsDown) == nil && RobotHandGesture.upsideDown(.palm) == nil && RobotHandGesture.upsideDown(.victory) == nil && RobotHandGesture.upsideDown(nil) == nil, "A picture read upside down: only a thumb up, as a thumb down")
+        precondition(RobotHandGesture.thumbWay(upright: nil, uprightSure: 0, turned: .thumbsUp, turnedSure: 0.4) == .thumbsDown && RobotHandGesture.thumbWay(upright: .thumbsUp, uprightSure: 0.5, turned: .thumbsUp, turnedSure: 0.8) == .thumbsDown, "Upside down surer: a thumb down")
+        precondition(RobotHandGesture.thumbWay(upright: .thumbsUp, uprightSure: 0.8, turned: .thumbsUp, turnedSure: 0.5) == .thumbsUp && RobotHandGesture.thumbWay(upright: .thumbsUp, uprightSure: 0.8, turned: nil, turnedSure: 0.9) == .thumbsUp && RobotHandGesture.thumbWay(upright: .palm, uprightSure: 0.3, turned: .thumbsUp, turnedSure: 0.9) == .palm, "Upright surer, or nothing upside down: what was read upright")
+        precondition(RobotExploreKey.title(exploring: false) == "Esplora" && RobotExploreKey.title(exploring: true) == "Ferma esplorazione" && RobotExploreKey.command(exploring: false)["on"] as? Bool == true && RobotExploreKey.command(exploring: true)["on"] as? Bool == false && RobotExploreKey.note(exploring: false, rover: false).contains("Senza rover") && RobotExploreKey.note(exploring: true, rover: true).contains("gira"), "«Esplora» starts or stops as the robot says; without the rover it is carried by hand")
+        precondition(RobotExploreKey.allowsGestures(enabled: true, exploring: false) && !RobotExploreKey.allowsGestures(enabled: true, exploring: true) && !RobotExploreKey.allowsGestures(enabled: false, exploring: false), "Exploration pauses gestures without changing the saved preference")
+        let exploreStatus = try! JSONDecoder().decode(RobotLiveStatus.self, from: Data(#"{"connected":true,"hardwareVerified":true,"calibrated":true,"motion":true,"motionEnabled":true,"camera":true,"audio":true,"screen":true,"exploring":true,"rover":false}"#.utf8))
+        precondition(exploreStatus.exploring == true && exploreStatus.rover == false, "The robot says whether it explores and whether the rover answers")
+        precondition(RobotForceHand.shouldSend(following: true, ready: true, pending: 0, x: 0.3, since: 0.2) && !RobotForceHand.shouldSend(following: false, ready: true, pending: 0, x: 0.3, since: 1) && !RobotForceHand.shouldSend(following: true, ready: true, pending: 1, x: 0.3, since: 1) && !RobotForceHand.shouldSend(following: true, ready: true, pending: 0, x: 0.3, since: 0.1) && !RobotForceHand.shouldSend(following: true, ready: true, pending: 0, x: nil, since: 1) && !RobotForceHand.shouldSend(following: true, ready: true, pending: 0, x: 1.5, since: 1), "The hand's place goes to the robot only while the Force follows it, one at a time, not too often")
+        var slow = RobotGestureWatch()
+        precondition(slow.feed(.palm, x: 0.5, at: 0) == nil && slow.feed(.palm, x: 0.5, at: 1.5) == nil && slow.feed(.palm, x: 0.5, at: 3.0) == nil, "Pictures too far apart are not one gesture")
+        print("PASS hand gestures: thumb up and down, open hand still = stop, moving = wave, two fingers; each said once")
+        // What else the app reads in the robot's video: a smile, the owner's face, a thing shown to the camera.
+        let rest = RobotSight.Mouth(left: HP(x: 0.31, y: 0.30), right: HP(x: 0.69, y: 0.30), top: 0.33, bottom: 0.27)
+        let grin = RobotSight.Mouth(left: HP(x: 0.26, y: 0.36), right: HP(x: 0.74, y: 0.36), top: 0.37, bottom: 0.25)
+        precondition((RobotSight.smileScore(rest) ?? 9) < RobotSight.smileOff && (RobotSight.smileScore(grin) ?? 0) >= RobotSight.smileOn && RobotSight.smileScore(RobotSight.Mouth(left: HP(x: 0.5, y: 0.3), right: HP(x: 0.52, y: 0.3), top: 0.3, bottom: 0.3)) == nil, "A mouth at rest, a wide one with its corners up, and one too small to read")
+        var mood = RobotSightWatch()
+        precondition(mood.face(score: 0.6, at: 0) == nil && mood.face(score: 0.6, at: 0.2) == nil && mood.face(score: 0.6, at: 0.4) == nil && mood.face(score: 0.6, at: 0.6) == nil && mood.face(score: 0.6, at: 0.8) == .smile && mood.face(score: 0.6, at: 1.0) == nil && mood.face(score: 0.6, at: 5) == nil, "A smile held for five pictures, said once")
+        var flicker = RobotSightWatch(); precondition((0..<12).allSatisfy { flicker.face(score: $0 % 3 == 2 ? 0.40 : 0.60, at: Double($0) * 0.2) == nil }, "A mouth that reads as a smile in two pictures out of three is not one")
+        precondition(mood.face(score: 0.50, at: 5.2) == nil && mood.face(score: 0.30, at: 5.4) == nil, "Still smiling above 0.48, then not")
+        var saidSerious: [Double] = []; for t in stride(from: 5.6, through: 90.0, by: 0.4) { if mood.face(score: 0.30, at: t) == .serious { saidSerious.append(t) } }
+        precondition(saidSerious.count == 2 && saidSerious[0] >= 25 && saidSerious[0] < 26 && saidSerious[1] - saidSerious[0] >= 59, "No smile for 20 s: serious, and again only a minute later")
+        precondition(mood.face(score: nil, at: 91) == nil && mood.face(score: 0.30, at: 92) == nil, "Nobody: the count starts again")
+        precondition(RobotSight.isOwner(distances: [0.4, 0.5, 0.9, 1.1, 0.8]) && !RobotSight.isOwner(distances: [0.4, 0.9, 0.9, 1.1, 0.8]) && !RobotSight.isOwner(distances: []) && RobotSight.isOwner(distances: [0.3]), "The owner: near two of the saved pictures (or the only one saved)")
+        var who = RobotSightWatch()
+        precondition(who.person(owner: true, at: 0) == nil && who.person(owner: true, at: 1) == .person && who.person(owner: true, at: 2) == nil && who.person(owner: true, at: 200) == nil, "Greeted once while the face stays")
+        precondition(who.person(owner: nil, at: 201) == nil && who.person(owner: nil, at: 240) == nil && who.person(owner: true, at: 241) == nil && who.person(owner: true, at: 242) == .person, "Away for half a minute and back: greeted again")
+        var other = RobotSightWatch(), strange: [Double] = []; for t in stride(from: 0.0, through: 8.0, by: 1.0) { if other.person(owner: false, at: t) == .stranger { strange.append(t) } }
+        precondition(strange == [4.0], "A face that is not the owner's for five pictures over four seconds: a stranger, once")
+        var mixedFace = RobotSightWatch()
+        precondition(mixedFace.person(owner: false, at: 0) == nil && mixedFace.person(owner: true, at: 1) == nil && mixedFace.person(owner: false, at: 2) == nil && mixedFace.person(owner: true, at: 3) == nil, "One picture each way decides nothing")
+        precondition(RobotSight.name("  Ada ") == "Ada" && RobotSight.name("D'Angelo 3!") == "D'Angelo" && RobotSight.name("12 !") == nil && RobotSight.name(String(repeating: "a", count: 40))?.count == 20, "The name: letters, spaces and apostrophes, twenty at most")
+        precondition(RobotSight.object([("computer_monitor", 0.9), ("mug", 0.7), ("cup", 0.6)]) == "una tazza" && RobotSight.object([("mug", 0.4)]) == nil && RobotSight.object([("computer_keyboard", 0.99)]) == nil, "Only things Robottino knows and is sure enough of; never what always stands on a desk")
+        precondition(RobotSight.objects.values.allSatisfy { $0.count <= 24 && $0.allSatisfy { $0.isLetter || $0 == " " || $0 == "'" } } && RobotSight.Kind.allCases.map(\.rawValue) == ["person", "stranger", "smile", "serious", "object"], "Words the relay and the MOD take; the same kinds as theirs")
+        var things = RobotSightWatch()
+        precondition(things.object(label: "una tazza", at: 0) == nil && things.object(label: "una tazza", at: 1) == "una tazza" && things.object(label: "una tazza", at: 2) == nil && things.object(label: "una tazza", at: 3) == nil && things.object(label: "una mela", at: 4) == nil && things.object(label: "una mela", at: 5) == "una mela", "The same thing in two pictures running, said once")
+        precondition(things.object(label: nil, at: 6) == nil && things.object(label: "una tazza", at: 60) == nil && things.object(label: "una tazza", at: 61) == nil && things.object(label: "una tazza", at: 130) == nil && things.object(label: "una tazza", at: 131) == "una tazza", "Not again for two minutes")
+        print("PASS sight: a smile and a serious face, the owner and a stranger, things shown to the camera; each said once")
+        // The iPhone helps the robot follow: the middle of the face, y from the top; one answer at a time, five a second, only when the head can move.
+        let aimAt = RobotFollowHelp.target(minX: 0.1, minY: 0.6, width: 0.2, height: 0.3)
+        precondition(abs((aimAt?.x ?? 9) - 0.2) < 1e-9 && abs((aimAt?.y ?? 9) - 0.25) < 1e-9 && RobotFollowHelp.target(minX: 0.5, minY: 0.5, width: 0.01, height: 0.3) == nil && RobotFollowHelp.target(minX: .nan, minY: 0, width: 0.2, height: 0.2) == nil, "Vision's box (y up) to the robot's place (y from the top)")
+        precondition(RobotFollowHelp.shouldSend(enabled: true, ready: true, motion: true, pending: 0, frame: 7, since: 0.08) && RobotFollowHelp.shouldSend(enabled: true, ready: true, motion: true, pending: 1, frame: 7, since: 0.1), "A numbered frame, a moment since the last, at most one answer still on its way: send")
+        precondition(![(false, true, true, 0, UInt32(7), 1.0), (true, false, true, 0, 7, 1.0), (true, true, false, 0, 7, 1.0), (true, true, true, 2, 7, 1.0), (true, true, true, 0, 0, 1.0), (true, true, true, 0, 7, 0.05)].contains { RobotFollowHelp.shouldSend(enabled: $0.0, ready: $0.1, motion: $0.2, pending: $0.3, frame: $0.4, since: $0.5) }, "Switched off, robot away, head still, two answers still on their way, a frame without a number, too soon: no")
+        print("PASS follow help: the face's place for the robot, at most two answers on their way")
+        // The link the app opens by itself: only in front, with a token, when no other page has its own; tries again a little later each time.
+        precondition(RobotAutoLink.shouldConnect(enabled: true, active: true, hasToken: true, open: false, otherPages: 0, busy: false), "App in front, nothing else connected: connect")
+        precondition(![(false, true, true, false, 0, false), (true, false, true, false, 0, false), (true, true, false, false, 0, false), (true, true, true, true, 0, false), (true, true, true, false, 1, false), (true, true, true, false, 0, true)].contains { RobotAutoLink.shouldConnect(enabled: $0.0, active: $0.1, hasToken: $0.2, open: $0.3, otherPages: $0.4, busy: $0.5) }, "Switched off, in the background, no token, already open, another page connected, a quick command going: no")
+        precondition(RobotAutoLink.takesBack(after: nil) && RobotAutoLink.takesBack(after: "app_silent") && !RobotAutoLink.takesBack(after: "app_replaced"), "Taken by a newer app link: the shared link waits for the app to come back to the front")
+        precondition(RobotLiveClose.message(reason: "app_replaced", status: nil, error: "x").hasPrefix("Un altro collegamento dell’app ha preso il robot."), "The reason of a link taken by a newer one, in plain words")
+        precondition((0...6).map { RobotAutoLink.delay(failures: $0) } == [3, 6, 12, 24, 30, 30, 30], "Each try a little later, never more than 30 s apart")
+        precondition(RobotAutoLink.wantsGestures(link: true, gestures: true, liveOpen: false, ready: true, camera: true) && ![(false, true, false, true, true), (true, false, false, true, true), (true, true, true, true, true), (true, true, false, false, true), (true, true, false, true, false)].contains { RobotAutoLink.wantsGestures(link: $0.0, gestures: $0.1, liveOpen: $0.2, ready: $0.3, camera: $0.4) }, "Gestures by themselves: only with the link on, the robot connected with its camera, and the Live page closed")
+        print("PASS automatic link: opens by itself in front, steps aside for other pages, backs off when the robot is away")
+        // The Robot tab's switches: an acknowledged command whose state has not changed yet is not a refusal.
+        precondition(RobotRemoteSwitchNote.text(wanted: true, state: true, confirmedOn: "on", confirmedOff: "off") == "on" && RobotRemoteSwitchNote.text(wanted: false, state: false, confirmedOn: "on", confirmedOff: "off") == "off", "Confirmed by the robot's own status")
+        precondition(RobotRemoteSwitchNote.text(wanted: true, state: false, confirmedOn: "on", confirmedOff: "off") == RobotRemoteSwitchNote.pendingOn && RobotRemoteSwitchNote.text(wanted: true, state: nil, confirmedOn: "on", confirmedOff: "off") == RobotRemoteSwitchNote.pendingOn, "Taken but not on yet: still on its way")
+        precondition(RobotRemoteSwitchNote.text(wanted: false, state: true, confirmedOn: "on", confirmedOff: "off") == RobotRemoteSwitchNote.pendingOff && !RobotRemoteSwitchNote.pendingOff.contains("Calibrazione") && RobotRemoteSwitchNote.waitSteps >= 80, "Switching off not confirmed: its own words, and 8 s of patience")
+        print("PASS Robot tab switches: confirmed, still on its way, or not switched off")
+        // The round stick: centre does nothing, the stronger axis wins, up is forward (screen y grows downwards).
+        precondition(RobotRoverStick.move(dx: 0, dy: 0, travel: 60) == nil && RobotRoverStick.move(dx: 10, dy: -10, travel: 60) == nil && RobotRoverStick.move(dx: 0, dy: -22, travel: 60) == .forward, "Near the centre nothing moves")
+        precondition(RobotRoverStick.move(dx: 10, dy: -50, travel: 60) == .forward && RobotRoverStick.move(dx: -10, dy: 50, travel: 60) == .back, "Up forward, down back")
+        precondition(RobotRoverStick.move(dx: -50, dy: 10, travel: 60) == .turnLeft && RobotRoverStick.move(dx: 50, dy: -10, travel: 60) == .turnRight, "Left and right turn on the spot")
+        precondition(RobotRoverStick.move(dx: 100, dy: 0, travel: 0) == nil && RobotRoverStick.move(dx: .nan, dy: 50, travel: 60) == nil, "Nonsense gives no move")
+        print("PASS rover stick: centre still, stronger axis wins, up forward, sideways turns on the spot")
+        // The speaker volume: whole levels 1…10 like the relay and the MOD; 9 is the robot's own default.
+        precondition(RobotVolume.command(1)?["level"] as? Int == 1 && RobotVolume.command(10)?["level"] as? Int == 10 && RobotVolume.command(0) == nil && RobotVolume.command(11) == nil && RobotVolume.standard == 9, "Levels 1…10 only, default 9")
+        print("PASS robot volume: levels 1…10, default 9")
+        precondition(RobotClimate.title(nil) == "Robottino" && RobotClimate.title(RobotClimate(t: 22.3, h: 41.4)) == "Robottino 22° 41%" && RobotClimate.title(RobotClimate(t: .nan, h: 40)) == "Robottino", "Temperature and humidity beside the title only when read")
+        print("PASS climate in the Robot tab title")
+        // The Robot tab's switches read their own state back (21 Nov 2026: «Chiamata se mi guardi per 10 secondi»).
+        var switches = RobotLiveStatus(connected: true, hardwareVerified: true, calibrated: true, motion: true, motionEnabled: true, roverFollow: false, gazeCall: true, camera: true, audio: true, screen: true, simulated: nil, conversation: nil)
+        precondition(switches.switchState("motionEnabled") == true && switches.switchState("roverFollow") == false && switches.switchState("gazeCall") == true && switches.switchState("other") == nil, "Each switch reads its own key")
+        switches.gazeCall = nil
+        precondition(switches.switchState("gazeCall") == nil, "An older robot that does not say: unknown, not off")
+        let switchesDecoded = try! JSONDecoder().decode(RobotLiveStatus.self, from: Data(#"{"connected":true,"hardwareVerified":true,"calibrated":true,"motion":true,"motionEnabled":true,"camera":true,"audio":true,"screen":true,"gazeCall":true}"#.utf8))
+        precondition(switchesDecoded.switchState("gazeCall") == true, "The service's status carries it")
+        print("PASS Robot tab switches read their own state")
+        // Studio and Live share the link: leaving Live keeps it only if nothing there films, listens or is starting.
+        precondition(RobotLiveLeave.keepsLink(camera: false, screen: false, following: false, phoneFollowing: false, mirroring: false, calling: false, busy: false), "Nothing running: the link stays for Studio and the rover")
+        let leavingLive: [(Bool, Bool, Bool, Bool, Bool, Bool, Bool)] = [(true,false,false,false,false,false,false),(false,true,false,false,false,false,false),(false,false,true,false,false,false,false),(false,false,false,true,false,false,false),(false,false,false,false,true,false,false),(false,false,false,false,false,true,false),(false,false,false,false,false,false,true)]
+        precondition(leavingLive.allSatisfy { !RobotLiveLeave.keepsLink(camera: $0.0, screen: $0.1, following: $0.2, phoneFollowing: $0.3, mirroring: $0.4, calling: $0.5, busy: $0.6) }, "Camera, screen image, following, imitation, call or a starting operation: leaving closes the link")
+        print("PASS leaving Live: link kept only when nothing films, listens or is starting")
         func liveStatus(conversation: Bool?, motion: Bool = true, camera: Bool = true, connected: Bool = true, simulated: Bool? = nil) -> RobotLiveStatus {
             RobotLiveStatus(connected: connected, hardwareVerified: true, calibrated: true, motion: motion, motionEnabled: motion, camera: camera, audio: true, screen: true, simulated: simulated, conversation: conversation)
         }
@@ -183,6 +339,18 @@ final class BackendProtocol: URLProtocol {
         let videoPacket = RobotMediaPacket(kind: 1, sequence: 42, width: 160, height: 120, payload: Data(repeating: 0x7f, count: 38400))
         let wire = try! videoPacket.encoded(), decoded = try! RobotMediaPacket.decode(wire)
         precondition(wire.count == 38412 && decoded.sequence == 42 && decoded.payload == videoPacket.payload)
+        // A camera picture as a JPEG (kind 8, 14 Nov 2026): whole in one message, bounded, and it must begin as a JPEG.
+        var jpeg = Data(repeating: 0x11, count: 5000); jpeg[0] = 0xFF; jpeg[1] = 0xD8
+        let jpegPacket = try! RobotMediaPacket.decode(RobotMediaPacket(kind: 8, sequence: 44, width: 160, height: 120, payload: jpeg).encoded())
+        precondition(jpegPacket.kind == 8 && jpegPacket.width == 160 && jpegPacket.height == 120 && jpegPacket.payload == jpeg)
+        do { _ = try RobotMediaPacket(kind: 8, sequence: 1, width: 160, height: 120, payload: Data(repeating: 0x11, count: 5000)).encoded(); preconditionFailure("A picture that is not a JPEG was accepted") } catch {}
+        do { _ = try RobotMediaPacket(kind: 8, sequence: 1, width: 160, height: 120, payload: jpeg + Data(count: RobotMediaPacket.jpegMax)).encoded(); preconditionFailure("An oversized JPEG was accepted") } catch {}
+        do { _ = try RobotMediaPacket(kind: 8, sequence: 1, width: 321, height: 240, payload: jpeg).encoded(); preconditionFailure("A JPEG wider than the camera was accepted") } catch {}
+        precondition(RobotLiveClient.cameraStart["jpeg"] as? Bool == true, "the app asks the robot for JPEG pictures")
+        precondition(RobotLiveClient.mayQueue(action: "motion", pending: 3) && !RobotLiveClient.mayQueue(action: "motion", pending: 4) && !RobotLiveClient.mayQueue(action: "track.stop", pending: 4) && RobotLiveClient.mayQueue(action: "stop", pending: 4) && RobotLiveClient.mayQueue(action: "stop", pending: 9), "Four commands waiting hold back a fifth, never STOP")
+        precondition(RobotLiveClient.mayQueue(action: "explore", pending: 4, on: false) && RobotLiveClient.mayQueue(action: "explore", pending: 7, on: false) && !RobotLiveClient.mayQueue(action: "explore", pending: 8, on: false) && !RobotLiveClient.mayQueue(action: "explore", pending: 4, on: true), "Stopping exploration passes a full queue within the eight-command limit")
+        precondition(RobotLiveClient.mayQueue(action: "rover", pending: 4, move: "stop") && RobotLiveClient.mayQueue(action: "rover", pending: 7, move: "stop") && !RobotLiveClient.mayQueue(action: "rover", pending: 8, move: "stop") && !RobotLiveClient.mayQueue(action: "rover", pending: 4, move: "forward"), "The rover's stop passes a full queue, up to eight; a move does not (code review, 19 Nov 2026)")
+        print("PASS JPEG camera pictures: one bounded message, asked for with camera.start")
         let audioPacket = RobotMediaPacket(kind: 3, sequence: 43, width: 0, height: 0, payload: Data(repeating: 0, count: 640))
         precondition((try! RobotMediaPacket.decode(audioPacket.encoded())).payload.count == 640)
         print("PASS production media wire round-trips RGB565 and PCM16 with bounded packet sizes")
@@ -476,6 +644,16 @@ final class BackendProtocol: URLProtocol {
         precondition(!failingNetworks.saveOnPhone() && failingNetworks.message.contains("non riuscito"))
         precondition(!RobotWiFiProfile(ssid: String(repeating: "à", count: 17), password: "test-only-password").valid)
         precondition(!RobotWiFiProfile(ssid: "network", password: "short").valid)
+        // The vault could not be read at start (iPhone locked): a save never blanks the profiles it did not show
+        // (code review, 19 Nov 2026); once readable, what was not typed comes from the saved ones.
+        var locked = true, vault = RobotWiFiProfiles(); vault.home = RobotWiFiProfile(ssid: "Casa", password: "test-only-password"); vault.hotspot = RobotWiFiProfile(ssid: "phone-network", password: "test-hotspot-only")
+        let lockedNetworks = RobotNetworkSetup(load: { if locked { throw URLError(.userAuthenticationRequired) }; return vault }, save: { vault = $0 }, remove: {})
+        lockedNetworks.profiles.home = RobotWiFiProfile(ssid: "Ufficio", password: "test-office-only")
+        precondition(!lockedNetworks.saveOnPhone() && vault.hotspot.ssid == "phone-network", "Not saved while the saved profiles are unread")
+        locked = false
+        precondition(lockedNetworks.saveOnPhone() && vault.home.ssid == "Ufficio" && vault.hotspot == RobotWiFiProfile(ssid: "phone-network", password: "test-hotspot-only"), "The hotspot not shown is kept")
+        locked = true; let unread = RobotNetworkSetup(load: { if locked { throw URLError(.userAuthenticationRequired) }; return vault }, save: { vault = $0 }, remove: {}); locked = false
+        unread.restorePasswords(); precondition(unread.profiles == vault, "Read later: the whole profiles, names too")
         networks.clearOnPhone(); precondition(networkRemoves == 1 && savedNetworks.home.empty && savedNetworks.hotspot.empty)
         print("PASS two WiFi profiles persist through injected secure vault, preserve exact SSIDs, reject invalid/duplicate networks and clear draft passwords")
         BackendProtocol.status = 200
@@ -535,7 +713,8 @@ final class BackendProtocol: URLProtocol {
         precondition((try? RobotMediaPacket(kind: 5, sequence: 1, width: 320, height: 240, payload: Data([0, 0, 0, 1, 0, 2, 0x58, 0]) + Data(count: 4)).encoded()) == nil, "A piece past the end is rejected")
         print("PASS full-resolution screen image: 5 pieces of 32 KB, same layout as the robot camera")
 
-        precondition(RobotFaceStyle.allCases.map(\.rawValue) == ["portrait", "white", "redhead"] && RobotFaceStyle.from("nope") == .portrait)
+        precondition(RobotFaceStyle.allCases.map(\.rawValue) == ["portrait", "white", "redhead", "curly"] && RobotFaceStyle.from("nope") == .portrait)
+        precondition(RobotFaceStyle.curly.image("talk-open") == "Face-Curly-talk-open" && RobotFaceStyle.curly.title == "Riccia" && RobotFaceStyle.curly.smilesWhileListening)
         precondition(RobotFaceStyle.redhead.image("talk-open") == "Face-Red-talk-open" && !RobotFaceStyle.white.smilesWhileListening)
         let quietPCM = Data(count: 960), loudPCM = Data((0..<480).flatMap { i -> [UInt8] in let v = Int16(i % 2 == 0 ? 3000 : -3000); return [UInt8(truncatingIfNeeded: v), UInt8(truncatingIfNeeded: v >> 8)] })
         precondition(RobotVoiceProtocol.mouthOpenness(quietPCM) == 0 && RobotVoiceProtocol.mouthOpenness(loudPCM) == 1, "Mouth openness: silence closed, loud fully open")
@@ -566,6 +745,9 @@ final class BackendProtocol: URLProtocol {
         precondition(wifiBatch == ["_batch": ["wifi.ssid": "Casa Ada’s", "wifi.password": "pàssword-123"]])
         precondition(RobotWiFiBluetooth.notification(Data("{\"prop\":\"wifi.ssid\",\"value\":\"Casa\"}".utf8))! == ("wifi.ssid", "Casa"))
         precondition(RobotWiFiBluetooth.notification(Data("{\"prop\":\"tts.volume\",\"value\":3}".utf8)) == nil)
+        precondition(RobotWiFiBluetooth.secret(Data("{\"prop\":\"wifi.password\",\"value\":\"\",\"secret\":true,\"set\":true,\"saved\":true}".utf8))! == ("wifi.password", true), "the robot confirms a password without sending it back")
+        precondition(RobotWiFiBluetooth.secret(Data("{\"prop\":\"wifi.password\",\"value\":\"\",\"secret\":true,\"set\":true}".utf8))! == ("wifi.password", false), "its first report is not a confirmation")
+        precondition(RobotWiFiBluetooth.secret(Data("{\"prop\":\"wifi.ssid\",\"value\":\"Casa\"}".utf8)) == nil && RobotWiFiBluetooth.secret(Data("{\"prop\":\"ai.token\",\"value\":\"\",\"secret\":true,\"saved\":true}".utf8)) == nil, "only the Wi-Fi's secret counts")
         print("PASS Wi-Fi Bluetooth payload: upstream batch format, 60-byte UTF-8-safe chunks, robot confirmations")
     }
 }

@@ -4,6 +4,8 @@
 // sad picture; the robot: its shell the same size and centre as in white-neutral). Anything outside its own panel
 // is the panel's background colour, never the next picture. Run from the repository root:
 // swift firmware/stackchan-mod/prepare-angry.swift
+// The redhead's angry picture is no longer made here (16 Nov 2026): the owner sent new pictures of her, the angry one
+// among them, and prepare-redhead.swift makes all eight. Her panel in the sheet is not read any more.
 import Foundation
 import CoreGraphics
 import ImageIO
@@ -30,9 +32,6 @@ func cut(_ name:String,panel:CGRect,origin:CGPoint,scale:CGFloat,fill:(CGFloat,C
 }
 // Blonde: irises at (262,352) and (398,352) in the sheet, at (127,127) and (200,127) in girl-sad: scale 73.3/136.
 cut("girl-angry.png",panel:CGRect(x:25,y:85,width:608,height:495),origin:CGPoint(x:27,y:116.4),scale:0.539,fill:(0.05,0.07,0.30))
-// Redhead: the panel (637…1237) is narrower than the eye distance alone would need, so the scale fits its width
-// (0.533; the eyes come out 4% further apart than in red-sad); irises at y 353 in the sheet, 127 in red-sad.
-cut("red-angry.png",panel:CGRect(x:637,y:85,width:600,height:495),origin:CGPoint(x:637,y:115.6),scale:0.533,fill:(0.07,0.15,0.30))
 // White robot: shell 543×421 at (1268,103) in the sheet, 266×215 at (23,8) in white-neutral: scale 0.495, centres
 // aligned. The sheet's robot sits closer to its panel's left edge: the missing columns are black, as the background;
 // the panel's grey top edge and the top of the body under the head (not in the robot's other pictures) are left out.
@@ -113,5 +112,31 @@ func skinTone(_ name:String,like:String,box:(x0:Int,y0:Int,x1:Int,y1:Int),lips:(
   print(name,"skin",a.m.map{Int($0)},"→",n.m.map{Int($0)})
 }
 skinTone("girl-angry.png",like:"girl-neutral.png",box:(85,40,240,225),lips:(165,192),face:(163,140,70,88))
-skinTone("red-angry.png",like:"red-neutral.png",box:(100,50,225,225),lips:(164.5,192),face:(163,140,56,88))
-print("Prepared girl-angry.png, red-angry.png and white-angry.png (320×240) from angry-source.png. No firmware or cloud changes.")
+// The hair (owner, 14 Nov 2026, of the redhead: «sistema il viso arrabbiato, mi sembra leggermente diverso nei capelli
+// da quello normale»; then «sì, anche la bionda»): the picture sent for the angry face is another drawing, with the
+// hair done another way. So only the face is taken from it: brows, eyes, nose, mouth
+// and the skin around them, inside a rounded box that stays within the skin of both pictures; everything else (hair,
+// ears, neck, background) is the serene picture, with a soft passage between the two. The eyes are already at the
+// same place in both, and the skin already has the serene picture's colour (skinTone above).
+// cx, cy: the middle of the face; rx, ry: half width and half height of the box; soft: how much of it is passage;
+// narrow, from: how much narrower the box is at its bottom than at the row `from`, shrinking evenly in between
+// (0: not at all), for an angry face whose jaw is slimmer than the serene one's.
+func faceOnto(_ name:String,like:String,cx:Double,cy:Double,rx:Double,ry:Double,soft:Double,narrow:Double=0,from:Double=0){
+  var px=pixels(name);let ref=pixels(like)
+  for y in 0..<240{for x in 0..<320{
+    let down=max(0,(Double(y)-from)/(cy+ry-from)),wide=rx*(1-narrow*down)
+    let dx=abs(Double(x)-cx)/wide,dy=abs(Double(y)-cy)/ry,r=pow(pow(dx,4)+pow(dy,4),0.25)
+    let m=max(0,min(1,(1-r)/soft)),weight=m*m*(3-2*m),i=(y*320+x)*4
+    for k in 0..<3{px[i+k]=UInt8((Double(ref[i+k])*(1-weight)+Double(px[i+k])*weight).rounded())}
+  }}
+  let ctx=CGContext(data:&px,width:320,height:240,bitsPerComponent:8,bytesPerRow:1280,space:CGColorSpaceCreateDeviceRGB(),bitmapInfo:CGImageAlphaInfo.noneSkipLast.rawValue)!
+  let dst=CGImageDestinationCreateWithURL(URL(fileURLWithPath:assets+name) as CFURL,UTType.png.identifier as CFString,1,nil)!
+  CGImageDestinationAddImage(dst,ctx.makeImage()!,nil);if !CGImageDestinationFinalize(dst){fatalError("cannot write "+name)}
+}
+// The blonde: her angry picture has another parting and other waves,
+// and a wider face. Her serene face has the brows higher and the eyes much larger, so the box goes from above her
+// serene brows (the right one reaches x 225) down to the chin and out past the corners of her serene eyes. Her angry
+// jaw is slimmer than the serene one (its edge at x 95 on row 160 and at x 121 on row 207): below the eyes the box
+// narrows so as to stay inside it, or that edge shows as a line across the serene cheek.
+faceOnto("girl-angry.png",like:"girl-neutral.png",cx:163,cy:150,rx:80,ry:72,soft:0.14,narrow:0.82,from:140)
+print("Prepared girl-angry.png and white-angry.png (320×240) from angry-source.png. No firmware or cloud changes.")

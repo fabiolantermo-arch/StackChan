@@ -3,10 +3,10 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {SourceTextModule,SyntheticModule,createContext} from 'node:vm';
 import {readFile} from 'node:fs/promises';
-async function launch({saveWorks=true,diag}={}){
+async function launch({saveWorks=true,diag,failSocket=false}={}){
   const context=createContext({JSON,Promise,Error,String,Number});
   const sockets=[],timers=new Map(),calls=[],store=new Map();let id=0;
-  class Socket{static handshake=2;static receive=3;static disconnect=-1;constructor(options){this.options=options;this.sent=[];sockets.push(this);}write(v){this.sent.push(JSON.parse(v));}close(){this.closed=true;}}
+  class Socket{static handshake=2;static receive=3;static disconnect=-1;constructor(options){if(failSocket)throw Error('no socket');this.options=options;this.sent=[];sockets.push(this);}write(v){this.sent.push(JSON.parse(v));}close(){this.closed=true;}}
   const fake=exports=>new SyntheticModule(Object.keys(exports),function(){for(const [k,v] of Object.entries(exports))this.setExport(k,v);},{context});
   const modules={'robottino-socket':fake({Client:Socket}),
     preference:fake({default:{get:(_d,k)=>store.get(k),set:(_d,k,v)=>{if(saveWorks)store.set(k,v);}}}),
@@ -39,4 +39,12 @@ test('a failed save is reported, bad messages end the pairing, and the code expi
   assert.deepEqual(a.sockets[0].sent,[{type:'stored',ok:false}]);a.runTimers();assert.deepEqual(a.calls.at(-1),['ended','store_failed']);
   const b=await launch();await b.pairing.start();b.receive({type:'credential',token:'short'});assert.deepEqual(b.calls.at(-1),['ended','error']);assert.equal(b.store.size,0);
   const c=await launch();await c.pairing.start();c.runTimers();assert.deepEqual(c.calls.at(-1),['ended','expired']);
+});
+test('the server closing right after the confirmation is a pairing that worked; a socket that cannot be made ends it (code review, 19 Nov 2026)',async()=>{
+  const h=await launch();await h.pairing.start();h.receive({type:'code',code:'042137'});h.receive({type:'credential',token:'r'.repeat(64)});
+  h.sockets[0].callback(-1);assert.deepEqual(h.calls.at(-1),['ended','paired']);assert.equal(h.pairing.active,false);
+  const a=await launch({saveWorks:false});await a.pairing.start();a.receive({type:'credential',token:'r'.repeat(64)});a.sockets[0].callback(-1);assert.deepEqual(a.calls.at(-1),['ended','store_failed']);
+  const b=await launch();await b.pairing.start();b.receive({type:'code',code:'042137'});b.sockets[0].callback(-1);assert.deepEqual(b.calls.at(-1),['ended','closed'],'before the credential it is an interruption');
+  const c=await launch({failSocket:true});assert.equal(await c.pairing.start(),false);assert.deepEqual(c.calls.at(-1),['ended','error']);
+  assert.equal(c.pairing.active,false,'not stuck: it can be started again');
 });

@@ -1,0 +1,116 @@
+<title>Inseguimento simulato</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&family=Space+Grotesk:wght@500;700&family=JetBrains+Mono:wght@400&display=swap">
+<style>
+/* Layout: one workbench — the room from above on the left, the robot's own readings on the right; stacks on a phone. */
+:root{--bg:#f3f5f4;--panel:#ffffff;--fg:#17201d;--muted:#5d6a65;--line:#d5ddd9;--floor:#e8eeeb;--accent:#0f7a63;--person:#c2410c;--cone:rgba(15,122,99,.14);--tof:rgba(37,99,235,.22);--tofline:#2563eb;
+  --display:"Space Grotesk",system-ui,sans-serif;--body:Inter,system-ui,sans-serif;--mono:"JetBrains Mono",ui-monospace,monospace}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#101614;--panel:#17201d;--fg:#e6eeea;--muted:#9aa9a3;--line:#2b3733;--floor:#1c2622;--accent:#3ccfa8;--person:#fb923c;--cone:rgba(60,207,168,.16);--tof:rgba(96,165,250,.22);--tofline:#60a5fa;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#101614;--panel:#17201d;--fg:#e6eeea;--muted:#9aa9a3;--line:#2b3733;--floor:#1c2622;--accent:#3ccfa8;--person:#fb923c;--cone:rgba(60,207,168,.16);--tof:rgba(96,165,250,.22);--tofline:#60a5fa;color-scheme:dark}
+body{background:var(--bg);color:var(--fg);font-family:var(--body);padding-block:20px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+h1{font-family:var(--display);font-size:1.6rem;margin:0 0 4px;text-wrap:balance}
+p.lead{color:var(--muted);margin:0 0 16px;max-width:65ch;line-height:1.5}
+.bench{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:16px;align-items:start}
+@media (max-width:820px){.bench{grid-template-columns:1fr}}
+.room{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px;min-width:0}
+canvas{width:100%;height:auto;display:block;border-radius:6px;touch-action:none;cursor:grab}
+.side{display:flex;flex-direction:column;gap:12px;min-width:0}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+.card h2{font-family:var(--display);font-size:.8rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:0 0 8px}
+dl{display:grid;grid-template-columns:auto 1fr;gap:6px 12px;margin:0;font-variant-numeric:tabular-nums}
+dt{color:var(--muted)}dd{margin:0;font-family:var(--mono);text-align:right}
+.why{font-family:var(--mono);font-size:.85rem;line-height:1.6;max-height:9.6em;overflow:auto}
+.row{display:flex;flex-wrap:wrap;gap:8px}
+button{font:600 .9rem var(--body);padding:8px 12px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--fg);cursor:pointer}
+button[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--panel)}
+button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.note{color:var(--muted);font-size:.82rem;line-height:1.5}
+</style>
+
+<h1>Inseguimento con rover e testa</h1>
+<p class="lead">Trascina la persona nella stanza, oppure lasciala camminare da sola. Il robot gira la testa verso il viso, gira il corpo quando la testa è troppo di lato, e con il sensore di distanza resta a circa 60 cm. Dal 16 novembre avanza senza fermarsi finché ti vede (prima a scatti), gira in un solo movimento fino all’angolo giusto, misurandolo con il giroscopio, e ti viene dietro anche oltre i 2 m del sensore. Se non ti vede per 3 secondi, il corpo fa un giro lento e continuo, guardando, finché ti ritrova, dal lato da cui il viso è uscito dall’immagine (se in un giro intero non trova nessuno, continua a passi come prima); dopo 30 secondi senza nessuno si addormenta. Le decisioni sono quelle di <code>rover-follow.js</code>, lo stesso codice che gira sul robot; le velocità del rover sono ipotesi, da misurare sul rover vero.</p>
+
+<div class="bench">
+  <div class="room"><canvas id="room" width="900" height="640" aria-label="La stanza vista dall’alto: il robot, la persona, il campo della camera e del sensore di distanza"></canvas></div>
+  <div class="side">
+    <div class="card"><h2>Comandi</h2>
+      <div class="row">
+        <button id="walk" aria-pressed="false">Cammina da sola</button>
+        <button id="hide">Sparisci dietro</button>
+        <button id="reset">Ricomincia</button>
+      </div>
+    </div>
+    <div class="card"><h2>Cosa sa il robot</h2>
+      <dl>
+        <dt>Viso visto</dt><dd id="seen">—</dd>
+        <dt>Testa (yaw)</dt><dd id="yaw">—</dd>
+        <dt>Distanza VL53L0X</dt><dd id="dist">—</dd>
+        <dt>Distanza vera</dt><dd id="truth">—</dd>
+        <dt>Viso verso</dt><dd id="gone">—</dd>
+        <dt>Ruote</dt><dd id="wheels">ferme</dd>
+      </dl>
+    </div>
+    <div class="card"><h2>Ultime decisioni</h2><div class="why" id="log"></div></div>
+    <div class="card note" id="assume"></div>
+  </div>
+</div>
+
+<script type="module">
+/*ROVER_FOLLOW*/
+/*WORLD*/
+// --- The page: only drawing and the pointer. The world is scripts/sim-follow-world.js, the deciding rover-follow.js.
+const canvas=document.getElementById('room'),ctx=canvas.getContext('2d');
+const $=id=>document.getElementById(id);
+const css=name=>getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+let world,robot,person,log,walking=false,walkT=0,drag=false;
+function reset(){world=createWorld({RoverFollow,FOLLOW});robot=world.robot;person=world.person;log=[];render();$('log').textContent='';}
+const side=z=>z<0?'sinistra (sua)':'destra (sua)';
+function step(){
+  if(walking){walkT+=SIM.cycleMs/1000;person.x=2.25+1.5*Math.cos(walkT*0.25);person.y=1.6+0.9*Math.sin(walkT*0.37);}
+  const s=world.step(),sees=s.inView&&!s.asleep&&s.now-s.lastSeen<FOLLOW.lostMs;
+  for(const e of s.events){
+    if(e==='sleep')say('nessuno da 30 s: dorme');else if(e==='wake')say('sveglio');
+    else if(e.stop)say(e.stop==='arrived'?'arrivato: si ferma':e.stop==='seen'?'ti ha visto: si ferma':e.stop==='turned'?`giro finito: ${Math.round(e.turned*180/Math.PI)}° ${e.measured?'misurati':'a tempo'}, testa indietro`:'si ferma');
+    else if(e.move){const m=e.move,far=e.mm>2000?'oltre il sensore':e.mm+' mm';
+      say(m.why==='turn'?`gira a ${side(m.z)} al ${Math.abs(m.z)} %`:m.why==='search'?(m.look?'ti cerca: giro lento a ':'ti cerca a passi: gira a ')+side(m.z):m.why==='closer'?`avanti al ${m.y} %: ${far}`:`indietro: ${e.mm} mm`);}
+  }
+  $('seen').textContent=s.asleep?'dorme':sees?'sì':s.now-s.lastSeen<FOLLOW.searchAfterMs?'perso, aspetta':'no, ti cerca';
+  $('gone').textContent=s.gone>0?'sinistra (sua)':s.gone<0?'destra (sua)':'centro';
+  $('yaw').textContent=`${Math.round(robot.yaw*180/Math.PI)}°`;
+  $('dist').textContent=s.distance.valid?`${s.distance.mm} mm`:'niente davanti';
+  $('truth').textContent=`${Math.round(s.range*1000)} mm`;
+  const m=s.move;$('wheels').textContent=m?(m.why==='turn'?'girano':m.why==='search'?(m.look?`giro lento ${Math.abs(m.z)} % (ricerca)`:'girano (ricerca a passi)'):m.y>0?`avanti ${m.y} %${m.z?', curvando':''}`:'indietro'):'ferme';
+  render(sees,s.inCone,s.asleep);
+}
+function say(text){log.unshift(`${(world.now/1000).toFixed(1)} s  ${text}`);log=log.slice(0,8);$('log').textContent=log.join('\n');}
+function render(seen=false,inCone=false,asleep=false){
+  const W=canvas.width,H=canvas.height,s=Math.min(W/SIM.roomW,H/SIM.roomH),X=x=>x*s,Y=y=>y*s;
+  ctx.fillStyle=css('--floor');ctx.fillRect(0,0,W,H);
+  ctx.strokeStyle=css('--line');ctx.lineWidth=1;for(let m=0.5;m<SIM.roomW;m+=0.5){ctx.beginPath();ctx.moveTo(X(m),0);ctx.lineTo(X(m),H);ctx.stroke();}for(let m=0.5;m<SIM.roomH;m+=0.5){ctx.beginPath();ctx.moveTo(0,Y(m));ctx.lineTo(W,Y(m));ctx.stroke();}
+  const cone=(dir,width,len,fill)=>{ctx.fillStyle=fill;ctx.beginPath();ctx.moveTo(X(robot.x),Y(robot.y));ctx.arc(X(robot.x),Y(robot.y),len*s,-(dir+width/2),-(dir-width/2));ctx.closePath();ctx.fill();};
+  cone(robot.h+robot.yaw,SIM.fov,SIM.faceMax,css('--cone'));
+  cone(robot.h,SIM.tofCone,2,css('--tof'));
+  // keep band: where the robot is happy
+  ctx.strokeStyle=css('--muted');ctx.setLineDash([6,6]);ctx.beginPath();ctx.arc(X(person.x),Y(person.y),FOLLOW.keepMm/1000*s,0,2*Math.PI);ctx.stroke();ctx.setLineDash([]);
+  // robot body (rover) and head
+  ctx.save();ctx.translate(X(robot.x),Y(robot.y));ctx.rotate(-robot.h);
+  ctx.fillStyle=css('--panel');ctx.strokeStyle=css('--fg');ctx.lineWidth=2;ctx.fillRect(-.12*s,-.075*s,.24*s,.15*s);ctx.strokeRect(-.12*s,-.075*s,.24*s,.15*s);
+  ctx.strokeStyle=css('--tofline');ctx.beginPath();ctx.moveTo(.12*s,0);ctx.lineTo(.2*s,0);ctx.stroke();
+  ctx.rotate(-robot.yaw);ctx.fillStyle=css('--accent');ctx.beginPath();ctx.arc(0,0,.055*s,0,2*Math.PI);ctx.fill();ctx.strokeStyle=css('--accent');ctx.beginPath();ctx.moveTo(0,0);ctx.lineTo(.13*s,0);ctx.stroke();
+  ctx.restore();
+  // person
+  ctx.fillStyle=css('--person');ctx.beginPath();ctx.arc(X(person.x),Y(person.y),.09*s,0,2*Math.PI);ctx.fill();
+  ctx.fillStyle=css('--fg');ctx.font=`600 ${Math.round(.07*s)}px Inter, system-ui, sans-serif`;ctx.fillText(asleep?'dorme':seen?'ti vedo':'non ti vedo',X(person.x)+.12*s,Y(person.y)-.08*s);
+}
+function toWorld(e){const r=canvas.getBoundingClientRect(),s=Math.min(canvas.width/SIM.roomW,canvas.height/SIM.roomH);return {x:(e.clientX-r.left)*canvas.width/r.width/s,y:(e.clientY-r.top)*canvas.height/r.height/s};}
+canvas.addEventListener('pointerdown',e=>{drag=true;canvas.setPointerCapture(e.pointerId);setWalk(false);Object.assign(person,toWorld(e));});
+canvas.addEventListener('pointermove',e=>{if(drag){const p=toWorld(e);person.x=Math.max(.1,Math.min(SIM.roomW-.1,p.x));person.y=Math.max(.1,Math.min(SIM.roomH-.1,p.y));}});
+canvas.addEventListener('pointerup',()=>{drag=false;});
+function setWalk(on){walking=on;$('walk').setAttribute('aria-pressed',String(on));}
+$('walk').addEventListener('click',()=>setWalk(!walking));
+$('reset').addEventListener('click',()=>{setWalk(false);reset();});
+// Behind the robot, a metre and a half away: out of the camera's view at once.
+$('hide').addEventListener('click',()=>{setWalk(false);const back=robot.h+robot.yaw+Math.PI;person.x=Math.max(.1,Math.min(SIM.roomW-.1,robot.x+1.5*Math.cos(back)));person.y=Math.max(.1,Math.min(SIM.roomH-.1,robot.y-1.5*Math.sin(back)));});
+$('assume').textContent=`Ipotesi da misurare sul rover vero: al 100 % ${SIM.fullSpeed} m/s e ${Math.round(SIM.fullTurn*180/Math.PI)}°/s; il robot avanza al ${FOLLOW.fastSpeed} % da lontano e al ${FOLLOW.speed} % nell’ultimo tratto, e mentre va dritto la camera continua a guardare (un’immagine ogni ${SIM.frameMs} ms). Camera ${Math.round(SIM.fov*180/Math.PI)}°, sensore ${Math.round(SIM.tofCone*180/Math.PI)}° fino a 2 m. Distanza tenuta ${FOLLOW.keepMm} mm ± ${FOLLOW.bandMm}. Un giro verso il viso è un solo movimento, misurato dal giroscopio (fino a ${Math.round(FOLLOW.turnAllYaw*180/Math.PI)}°, al massimo ${FOLLOW.turnLongMs/1000} s). Ricerca dopo ${FOLLOW.searchAfterMs/1000} s: un giro lento e continuo tenuto a ${Math.round(FOLLOW.searchSmoothRate*180/Math.PI)}°/s, con la camera che guarda (qui si ipotizza che trovi un viso fino a ${Math.round(SIM.turnSightRate*180/Math.PI)}°/s: sul robot vero non si sa ancora); dopo un giro intero senza nessuno, passi di ${FOLLOW.searchMs} ms al ${FOLLOW.searchSpeed} % con pausa.`;
+reset();setInterval(step,SIM.cycleMs);
+</script>

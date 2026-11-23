@@ -1,0 +1,13 @@
+diff --git a/firmware/host/platforms/m5stackchan_cores3/sd-card.ts b/firmware/host/platforms/m5stackchan_cores3/sd-card.ts
+index bf8dd5c..405aedc 100644
+--- a/firmware/host/platforms/m5stackchan_cores3/sd-card.ts
++++ b/firmware/host/platforms/m5stackchan_cores3/sd-card.ts
+@@ -31,4 +31,8 @@ export default Object.freeze({
+     const bytes = new Uint8Array(nativeXsVersionRange.call(undefined) as ArrayBuffer)
+     return [bytes[0], bytes[1], bytes[2], bytes[3]]
+   },
++  // Robottino (14 Nov 2026): a mod gets only this default export, so the card's files are offered here too: any
++  // use of them, with the pin the card shares with the screen handed over before and taken back after (the log on
++  // the card, firmware/stackchan-mod/sd-log.js).
++  withSDCard,
+ })

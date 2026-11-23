@@ -6,6 +6,9 @@
 //       npm run robot:talk -- --app --openai    → the iPhone app's path (/api/voice) with the chosen provider
 //       npm run robot:talk -- --ulaw            → as the robot until 9 November: binary μ-law audio both ways
 //       npm run robot:talk -- --ima             → as the real robot: replies in IMA ADPCM blocks, A-law microphone
+//       npm run robot:talk -- --room=19.4,56,98690 "Quanti gradi ci sono nella stanza?"
+//                                               → as a robot with the agent's tools and the ENV III (21 Nov 2026): the
+//                                                 Worker gets that room reading (°C, %, Pa); tools answer «unavailable»
 // It really calls the provider chosen in the app: it counts against the daily limits.
 import WebSocket from 'ws';
 import {spawn,spawnSync} from 'node:child_process';
@@ -21,7 +24,9 @@ const args=process.argv.slice(2),microphone=args.includes('--microphone'),phrase
 const appRoute=args.includes('--app'),chosen=args.includes('--elevenlabs')?'elevenlabs':'openai';
 const token=(await readFile(path.join(root,appRoute?'private/robot-token':'private/robot-device-token'),'utf8')).trim();
 const ima=!appRoute&&args.includes('--ima'),ulaw=!appRoute&&!ima&&args.includes('--ulaw');
-const route=appRoute?`/api/voice?provider=${chosen}&sessionId=${process.env.ROBOTTINO_SESSION??'prova-mac'}`:'/api/robot/voice'+(ima?'?audio=ima&mic=alaw':ulaw?'?audio=ulaw':'');
+const roomArg=args.find(a=>a.startsWith('--room='))?.slice(7).split(',').map(Number),room=!appRoute&&roomArg?.length>=2&&roomArg.every(Number.isFinite)?{t:roomArg[0],h:roomArg[1],...(roomArg[2]?{p:roomArg[2]}:{})}:null;
+const robotQuery=[ima?'audio=ima&mic=alaw':ulaw?'audio=ulaw':'',room?'tools=1':''].filter(Boolean).join('&');
+const route=appRoute?`/api/voice?provider=${chosen}&sessionId=${process.env.ROBOTTINO_SESSION??'prova-mac'}`:'/api/robot/voice'+(robotQuery?'?'+robotQuery:'');
 const log=text=>console.log(`[${new Date().toLocaleTimeString('it-IT')}] ${text}`);
 
 // Load the firmware's own protocol module (it imports robottino-live-wire by name).
@@ -30,7 +35,7 @@ const sources={'robottino-live-wire':'live-wire.js'};
 const wire=new SourceTextModule(await readFile(path.join(mod,'voice-wire.js'),'utf8'),{context});
 await wire.link(async name=>{const m=new SourceTextModule(await readFile(path.join(mod,sources[name]),'utf8'),{context});await m.link(()=>{throw Error('unexpected import');});return m;});
 await wire.evaluate();
-const {parseVoiceEvent,audioMessage,ulawEncode,ulawDecode,pongMessage,memoryMessage,isMemoryPhrase,VoiceTurns}=wire.namespace;
+const {parseVoiceEvent,audioMessage,ulawEncode,ulawDecode,pongMessage,memoryMessage,isMemoryPhrase,VoiceTurns,roomMessage,agendaMessage,toolResultMessage}=wire.namespace;
 const {pcmMouthLevel}=await import(pathToFileURL(path.join(mod,'live-wire.js')).href);
 // With --ima the microphone goes out as A-law with the host's own arithmetic (ChatAudioIO/Codecs), and the
 // replies come as the Worker's IMA frames, decoded as the robot's speaker driver does (dvi_adpcm_decode.c).
@@ -135,6 +140,9 @@ socket.on('message',(data,isBinary)=>{
       if(event.mouth>0)playingUntil=Math.max(playingUntil,Date.now())+pcm.length/2/outputRate*1000;return;
     }
     case 'interrupt':log('(interruzione)');return;
+    // --room: as the robot does (voice-device.js), the room reading first when the Worker asks for it, then the agenda.
+    case 'tools':if(room){if(event.room){socket.send(roomMessage(room));log(`Lettura della stanza mandata: ${room.t} °C, ${room.h} %${room.p?', '+Math.round(room.p/100)+' hPa':''}.`);}else log('Il servizio non chiede la lettura della stanza (versione vecchia).');socket.send(agendaMessage([]));}return;
+    case 'tool':log(`Strumento chiesto dall’assistente: ${event.command?.tool} (qui risponde «non disponibile»).`);socket.send(toolResultMessage(event.id,{ok:false,code:'unavailable'}));return;
     case 'pong':socket.send(pongMessage(event.id));return;
     case 'user':case 'assistant':{
       if(event.type==='user'&&event.final!==false)log(`Riconosciuto: «${event.text}»`);

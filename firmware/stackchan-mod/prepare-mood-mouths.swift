@@ -1,4 +1,4 @@
-// Talking mouths over the angry and sad faces (owner, 11 Nov 2026: «deve parlare con la faccia arrabbiata», then
+// Talking mouths over the angry, sad and scared faces (owner, 11 Nov 2026: «deve parlare con la faccia arrabbiata», then
 // «deve parlare con la faccia triste»). While Robottino speaks, the face keeps its angry or sad picture and only a small picture of the mouth changes, in the same four openings
 // as the serene face (portrait-state.js MOUTH_POSES: .18, .35, .58, .80). These pictures have no talking poses of
 // their own, so the openings are made from the picture itself:
@@ -38,15 +38,16 @@ func write(_ image: CGImage, _ path: String) {
 func crop(_ p: Picture, _ box: CGRect) -> CGImage { cgImage(p).cropping(to: box)! }
 
 // The girls. lip: y of the line between the lips; cx, half: centre and half width of the mouth; most: how far the
-// lower lip comes down at .80 (pixels); inside: colour of the open mouth.
-func girlMouth(_ base: Picture, open: Double, lip: Double, cx: Double, half: Double, most: Double, inside: (Double, Double, Double), box: CGRect) -> Picture {
+// lower lip comes down at .80 (pixels); inside: colour of the open mouth; fade: how far below the line the whole
+// drop still holds.
+func girlMouth(_ base: Picture, open: Double, lip: Double, cx: Double, half: Double, most: Double, fade: Double, inside: (Double, Double, Double), box: CGRect) -> Picture {
     var out = base
     func sample(_ x: Double, _ y: Double, _ c: Int) -> Double {
         let x0 = max(0, min(base.w - 2, Int(floor(x)))), y0 = max(0, min(base.h - 2, Int(floor(y)))), fx = x - Double(x0), fy = y - Double(y0)
         func v(_ X: Int, _ Y: Int) -> Double { Double(base.px[(Y * base.w + X) * 4 + c]) }
         return (v(x0, y0) * (1 - fx) + v(x0 + 1, y0) * fx) * (1 - fy) + (v(x0, y0 + 1) * (1 - fx) + v(x0 + 1, y0 + 1) * fx) * fy
     }
-    let drop = most * open / 0.8, fadeTop = lip + 14, bottom = Double(box.maxY) - 2
+    let drop = most * open / 0.8, fadeTop = lip + fade, bottom = Double(box.maxY) - 2
     for y in Int(box.minY)..<Int(box.maxY) { for x in Int(box.minX)..<Int(box.maxX) {
         let dx = (Double(x) - cx) / (half * 1.08), lens = dx * dx < 1 ? pow(1 - dx * dx, 0.6) : 0
         let fy = Double(y) - lip
@@ -98,25 +99,41 @@ func robotMouth(_ base: Picture, open: Double, cx: CGFloat, line: CGFloat, half:
 
 struct Style { let prefix: String; let mood: String; let box: CGRect; let make: (Picture, Double) -> Picture }
 // One entry per face and mood. The boxes go in portrait-state.js MOOD_MOUTH_BOXES.
-func girl(_ prefix: String, _ mood: String, lip: Double, cx: Double, half: Double, inside: (Double, Double, Double)) -> Style {
-    let box = CGRect(x: Int(cx.rounded()) - 35, y: Int(lip) - 14, width: 70, height: 50)
+// small: the redhead since 16 Nov 2026, her face 0.8 times the size it had (the owner's new pictures, the whole hair
+// in the screen): box, drop and fade are 0.8 times the blonde's.
+func girl(_ prefix: String, _ mood: String, lip: Double, cx: Double, half: Double, inside: (Double, Double, Double), small: Bool = false) -> Style {
+    let box = small ? CGRect(x: Int(cx.rounded()) - 28, y: Int(lip) - 11, width: 56, height: 40) : CGRect(x: Int(cx.rounded()) - 35, y: Int(lip) - 14, width: 70, height: 50)
     return Style(prefix: prefix, mood: mood, box: box) { base, open in
-        girlMouth(base, open: open, lip: lip, cx: cx, half: half, most: 9, inside: inside, box: box) }
+        girlMouth(base, open: open, lip: lip, cx: cx, half: half, most: small ? 7.2 : 9, fade: small ? 11 : 14, inside: inside, box: box) }
 }
 func robot(_ mood: String, line: CGFloat) -> Style {
     let box = CGRect(x: 132, y: Int(line) - 16, width: 56, height: 40)
     return Style(prefix: "white-", mood: mood, box: box) { base, open in robotMouth(base, open: open, cx: 160, line: line, half: 15, box: box) }
 }
 let styles = [
-    // Angry: line between the lips measured on the angry pictures.
+    // Angry: line between the lips measured on the angry pictures (red, 16 Nov 2026: darkest at rows 188-189, from
+    // x 145 to 182).
     girl("girl-", "angry", lip: 190, cx: 165, half: 21, inside: (78, 24, 28)),
-    girl("red-", "angry", lip: 190, cx: 164.5, half: 24, inside: (70, 22, 24)),
+    girl("red-", "angry", lip: 189, cx: 163.5, half: 19, inside: (70, 22, 24), small: true),
     robot("angry", line: 172),
     // Sad (owner, 11 Nov 2026: «deve parlare con la faccia triste»): the darkest row between the lips of the sad
-    // pictures (girl 194, from x 138 to 187; red 191, from 143 to 183), the white robot's frown from y 153 to 160.
+    // pictures (girl 194, from x 138 to 187; red 191, from 145 to 183), the white robot's frown from y 153 to 160.
     girl("girl-", "sad", lip: 194, cx: 162.5, half: 22, inside: (78, 24, 28)),
-    girl("red-", "sad", lip: 192, cx: 163, half: 23, inside: (70, 22, 24)),
+    girl("red-", "sad", lip: 192, cx: 164, half: 19, inside: (70, 22, 24), small: true),
     robot("sad", line: 158),
+    // Scared (owner, 14 Nov 2026: «quando la capovolgo deve fare la faccia spaventata»; only the redhead has the
+    // picture, red-scared.png, from prepare-redhead.swift): her mouth is open already, the upper teeth at y 188, the
+    // dark inside from 189 to 193 and from x 143 to 182; the lower lip begins at 194. The line is taken at 192,
+    // inside the dark of the mouth (on the light edge of the lower lip that edge stayed behind as a line across the
+    // open mouth): what is below comes down, so the opening only grows and the teeth stay where they are.
+    girl("red-", "scared", lip: 192, cx: 162.5, half: 19, inside: (70, 22, 24), small: true),
+    // The curly redhead (owner, 23 Nov 2026, prepare-curly.swift), her face the size of the redhead's: the darkest row
+    // between the lips of the angry (198, lips from x 147 to 188) and sad (197, from 147 to 189) pictures, only the middle
+    // of the lips moved (half 17: their corners droop, and a wider lens drew a dark seam there); her
+    // scared mouth is open already, dark from 195 to 203 and from x 157 to 178, so the line is taken inside it (198, above the lower teeth).
+    girl("curly-", "angry", lip: 198, cx: 167.5, half: 17, inside: (70, 22, 24), small: true),
+    girl("curly-", "sad", lip: 197, cx: 168, half: 17, inside: (70, 22, 24), small: true),
+    girl("curly-", "scared", lip: 198, cx: 167.5, half: 13, inside: (70, 22, 24), small: true),
 ]
 var check: [CGImage] = []
 for style in styles {

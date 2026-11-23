@@ -1,0 +1,45 @@
+diff --git a/modules/embedded/io/serial/esp32/serial.c b/modules/embedded/io/serial/esp32/serial.c
+index ef9d67c..a9ae9e3 100644
+--- a/modules/embedded/io/serial/esp32/serial.c
++++ b/modules/embedded/io/serial/esp32/serial.c
+@@ -172,7 +172,11 @@ void xs_serial_constructor(xsMachine *the)
+ 	serial->isReadable = 0;
+ 	serial->isWritable = 0;
+ 	serial->interrupt = C_NULL;
+-#if UART_NUM_MAX > 2
++	// Robottino (15 Nov 2026): this was «#if UART_NUM_MAX > 2», but since ESP-IDF 5 UART_NUM_MAX is a member of an
++	// enum, not a macro: the preprocessor reads it as 0, the lines for port 2 were left out, and port 2 was given
++	// the registers and the interrupt of port 1 (on the K151, the servos' line). Seen on the robot: opening port 2
++	// failed with «uart_isr_register failed», and serial.c.o had no reference to UART2.
++#if SOC_UART_HP_NUM > 2
+ 	if (2 == uart) {
+ 		serial->uart_reg = &UART2;
+ 		serial->uart_intr = ETS_UART2_INTR_SOURCE;
+@@ -185,6 +189,8 @@ void xs_serial_constructor(xsMachine *the)
+ 	}
+ 	serial->useCount = 1;
+ 	serial->hasOnReadableOrWritable = hasReadable || hasWritable;
++	// Robottino (15 Nov 2026): an overflow of before this opening is not this opening's (see xs_serial_read).
++	uart_ll_clr_intsts_mask(serial->uart_reg, UART_INTR_RXFIFO_OVF);
+ 
+ 	xsSetHostHooks(xsThis, (xsHostHooks *)&xsSerialHooks);
+ 
+@@ -281,6 +287,18 @@ void xs_serial_read(xsMachine *the)
+ 	Serial serial = xsmcGetHostDataValidate(xsThis, (void *)&xsSerialHooks);
+ 	int available;
+ 
++	// Robottino (15 Nov 2026): more bytes arrived than the port can hold (128) before anybody read them. Measured on
++	// the K151 (port 2 sending to itself, 336 bytes while JavaScript was busy): from then on every read gave what had
++	// arrived one write earlier, for good, with nothing to show it. As ESP-IDF's own driver does, what the port holds
++	// is thrown away and the port starts clean; the caller gets nothing from this read.
++	if (uart_ll_get_intraw_mask(serial->uart_reg) & UART_INTR_RXFIFO_OVF) {
++		uart_ll_rxfifo_rst(serial->uart_reg);
++		uart_ll_clr_intsts_mask(serial->uart_reg, UART_INTR_RXFIFO_OVF);
++		if (serial->onReadable)
++			uart_enable_rx_intr(serial->uart_reg);
++		return;
++	}
++
+ 	available = uart_ll_get_rxfifo_len(serial->uart_reg);
+ 	if (0 == available)
+ 		return;

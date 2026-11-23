@@ -48,3 +48,38 @@ export class Reminders {
     return fired;
   }
 }
+// Reminders at a clock time (owner, 14 Nov 2026: «ricordamelo domani alle 9»), asked for through the agent's tool
+// (src/robot-tools.ts): the Worker gives the instant (`at`, ms since 1970) from Italian time, the robot keeps it with
+// its words, saved in Preference so a restart does not lose it, and checks it against the network's clock
+// (Date.now(), valid once the host has the time). One missed while the robot was off is still said if it is at most
+// LATE_MS old; an older one is dropped.
+export const CLOCK_LIMIT=8,CLOCK_TEXT=60,LATE_MS=6*3600000,CLOCK_VALID=Date.UTC(2025,0,1);
+export class ClockReminders {
+  constructor(saved){
+    this.items=[];
+    let list;try{list=JSON.parse(saved);}catch{list=[];}
+    if(Array.isArray(list))for(const item of list)if(Number.isFinite(item?.at)&&typeof item?.text==='string'&&item.text&&this.items.length<CLOCK_LIMIT)this.items.push({at:item.at,text:item.text.slice(0,CLOCK_TEXT)});
+    this.items.sort((a,b)=>a.at-b.at);
+  }
+  // 'ok', or why not: 'clock' (no time from the network yet), 'past', 'full'. The same minute again replaces it.
+  add(at,text,wall){
+    if(!(wall>CLOCK_VALID))return 'clock';
+    if(!(at>wall))return 'past';
+    const minute=Math.floor(at/60000);
+    this.items=this.items.filter(item=>Math.floor(item.at/60000)!==minute);
+    if(this.items.length>=CLOCK_LIMIT)return 'full';
+    this.items.push({at,text:String(text).slice(0,CLOCK_TEXT)});this.items.sort((a,b)=>a.at-b.at);
+    return 'ok';
+  }
+  // How many were removed at that minute.
+  cancel(at){const minute=Math.floor(at/60000),before=this.items.length;this.items=this.items.filter(item=>Math.floor(item.at/60000)!==minute);return before-this.items.length;}
+  // The reminders whose time has come (and those too old to say, silently gone).
+  due(wall){
+    if(!(wall>CLOCK_VALID))return [];
+    const fired=[];
+    while(this.items[0]&&this.items[0].at<=wall){const item=this.items.shift();if(wall-item.at<=LATE_MS)fired.push({item,text:'Promemoria: '+item.text});}
+    return fired;
+  }
+  get list(){return this.items.map(item=>({at:item.at,text:item.text}));}
+  save(){return JSON.stringify(this.items);}
+}

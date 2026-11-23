@@ -132,11 +132,38 @@ export function validDance(steps){
   return total<=60000;
 }
 
+// The rover's moves from the iPhone (src/robot-wire.ts ROVER_MOVES): the robot's own left and right; ms per command.
+// Speaker volume from the iPhone (owner, 15 Nov 2026: «abbassa un po il volume distorce ancora, possiamo mettere una
+// regolazione volume sull app»). Levels 1…10 set the K151's amplifier (AW88298, host setup-target.js: 256 is full,
+// lower is quieter): level 10 is 252, the loudest the owner found clean on 14 Nov, and each level below is 6 lower.
+// Nothing above 252: 256 was distorted. Default 9 (246), a little lower than 252, which distorted again. The level is
+// saved on the robot (Preference robottino/volume) and comes back at every start.
+export const VOLUME={min:1,max:10,default:9,top:252,step:6};
+export const volumeAmp=level=>VOLUME.top-(VOLUME.max-level)*VOLUME.step;
+export const validVolume=level=>Number.isInteger(level)&&level>=VOLUME.min&&level<=VOLUME.max;
+export const ROVER_REMOTE_MOVES=['forward','back','left','right','turnLeft','turnRight','stop','gripOpen','gripHalf','gripClose']; // the last three: the gripper (rover-wire.js GRIP)
+export const ROVER_REMOTE_MS={min:200,max:1500};
+// Hand gestures the iPhone saw in the robot's video (src/robot-wire.ts HAND_GESTURES, 15 Nov 2026).
+export const HAND_GESTURES=['thumbsUp','thumbsDown','palm','wave','victory'];
+// What Robottino says to the two thumbs (owner, 15 Nov 2026, after trying them: «deve anche ridere o fare un verso di
+// tristezza, vedi tu»): its laugh, and «Oh-oh-oh, uffa.» in its own voice (recorded as prepare-phrase.mjs says:
+// ROBOTTINO_SESSION=gesto-triste-2 npm run robot:talk -- --app --elevenlabs "Qualcuno ti ha appena fatto il pollice verso e
+// ci sei rimasto male. Rispondi solo con questo verso triste e deluso, senza altre parole: Ooooh... uffa.").
+export const HAND_SOUNDS={thumbsUp:'sami-risata.bin',thumbsDown:'oh-uffa.bin'};
+// What else the iPhone saw (src/robot-wire.ts SIGHT_KINDS, 15 Nov 2026): the owner's name and a thing's name are the
+// only words that come with it, letters, spaces and apostrophes, 24 at most.
+export const SIGHT_KINDS=['person','stranger','smile','serious','object'];
+export const SIGHT_TEXT=/^[A-Za-zÀ-ÖØ-öø-ÿ' ]{1,24}$/;
+export const validSight=(kind,text)=>SIGHT_KINDS.includes(kind)&&(kind==='person'||kind==='object'?typeof text==='string'&&SIGHT_TEXT.test(text)&&text.trim().length>0:text===undefined);
 // Hardware-independent dispatcher used by both the MOD and the device test double.
 export class DeviceCommands {
   constructor(io,send){this.io=io;this.send=send;this.generation=0;this.busy=false;this.closed=false;this.lastSequence=0;}
   async command(value){
     if(this.closed||!value||typeof value.id!=='string'||value.id.length>64)return;
+    if(value.action==='explore'&&value.on===false){
+      let ok=true;try{await this.io.explore(false);}catch{ok=false;}
+      if(!this.closed)this.send({type:'ack',id:value.id,ok});return;
+    }
     if(value.action==='stop'){
       // An explicit STOP from the iPhone. (Until 10 Nov 2026 this comment sat in the middle of the line and hid the
       // answer and the return: everything stopped, but the iPhone was told that the STOP had failed.)
@@ -149,14 +176,14 @@ export class DeviceCommands {
     const arrived=Date.now(),slow=()=>{const took=Date.now()-arrived;if(took>700&&typeof trace==='function')trace(`[robottino] live slow ${value.action} ${took}\n`);};
     try {
       switch(value.action){
-        case 'camera.start':await this.io.camera(true);break;
+        case 'camera.start':await this.io.camera(true,value.jpeg===true);break; // jpeg: the iPhone can show JPEG pictures (kind 8)
         case 'camera.stop':await this.io.camera(false);break;
         case 'call.start':await this.io.call(true);break;
         case 'call.stop':await this.io.call(false);break;
         case 'screen.start':await this.io.screen(true);break;
         case 'screen.stop':await this.io.screen(false);break;
         case 'face.style':
-          if(!['portrait','white','redhead'].includes(value.style))throw Error('invalid_style');
+          if(!['portrait','white','redhead','curly'].includes(value.style))throw Error('invalid_style');
           await this.io.faceStyle(value.style);break;
         case 'dance':
           if(!validDance(value.steps))throw Error('invalid_dance');
@@ -164,9 +191,46 @@ export class DeviceCommands {
         // Face following with the robot camera: small frames out, where the iPhone found the face back.
         case 'track.start':await this.io.track(true);break;
         case 'track.stop':await this.io.track(false);break;
+        // The Force following the hand (force-follow.js): where the iPhone sees it across the robot camera's picture.
+        case 'hand':
+          if(!Number.isFinite(value.x)||value.x<0||value.x>1)throw Error('invalid_hand');
+          this.io.hand(value.x);break;
         case 'track':
           if(!Number.isInteger(value.frameId)||value.frameId<1||value.frameId>0xffffffff||![value.x,value.y].every(n=>Number.isFinite(n)&&n>=0&&n<=1))throw Error('invalid_target');
           this.io.target({frameId:value.frameId,x:value.x,y:value.y});break;
+        // The rover under the robot (rover-wire.js), from the iPhone's keys: the robot's own directions, a short move.
+        case 'rover':
+          if(!ROVER_REMOTE_MOVES.includes(value.move)||!Number.isInteger(value.ms)||value.ms<ROVER_REMOTE_MS.min||value.ms>ROVER_REMOTE_MS.max)throw Error('invalid_rover');
+          this.io.rover(value.move,value.ms);break;
+        // The owner, a stranger, a smile, a serious face or a thing seen by the iPhone: the robot answers (mod.js).
+        case 'sight':
+          if(!validSight(value.kind,value.text))throw Error('invalid_sight');
+          this.io.sight(value.kind,value.text);break;
+        // A hand gesture seen by the iPhone: the robot does what goes with it (mod.js), ACK only if it did.
+        case 'gesture':
+          if(!HAND_GESTURES.includes(value.name))throw Error('invalid_gesture');
+          this.io.gesture(value.name);break;
+        // The speaker volume (1…10): ACK only once the amplifier took it and the level is saved.
+        case 'volume':
+          if(!validVolume(value.level))throw Error('invalid_volume');
+          this.io.volume(value.level);break;
+        // The «Movimenti» switch of the Robot tab: off stops the head at once; on starts switching the motors on (the
+        // new state then reaches the iPhone in the robot's status, motionEnabled).
+        case 'motions':
+          if(typeof value.on!=='boolean')throw Error('invalid_motions');
+          this.io.motions(value.on);break;
+        // «Inseguimento con rover» of the Robot tab (rover-follow.js): on or off.
+        case 'roverFollow':
+          if(typeof value.on!=='boolean')throw Error('invalid_follow');
+          this.io.roverFollow(value.on);break;
+        // «Chiamata con lo sguardo» of the Robot tab (21 Nov 2026): on or off.
+        case 'gazeCall':
+          if(typeof value.on!=='boolean')throw Error('invalid_gaze');
+          this.io.gazeCall(value.on);break;
+        // «Esplora» of the Studio (explore.js, 23 Nov 2026): on or off.
+        case 'explore':
+          if(typeof value.on!=='boolean')throw Error('invalid_explore');
+          this.io.explore(value.on);break;
         case 'motion':
         case 'mirror':
           // Head control from the iPhone: 90° sideways and 85° up, never down (src/robot-wire.ts); the mirror ±10°.
@@ -193,6 +257,28 @@ export class DeviceCommands {
   }
   close(){if(this.closed)return;this.closed=true;this.generation++;this.busy=false;try{Promise.resolve(this.io.stop()).catch(()=>{});}catch{}}
 }
+
+// Kind 8 (14 Nov 2026, owner: «prova a migliorare il video live da iPhone. Adesso è un 160x120, un fotogramma al
+// secondo»): one camera picture as a JPEG, whole, in one message: the 12 bytes of every media message, then the JPEG
+// as the host's encoder made it. A raw 160×120 picture is 38 KB and the robot's link carries about 35 KB a second;
+// the same picture as a JPEG is about 5 KB and leaves in one go. Sent only when the iPhone asked for it with
+// camera.start (`jpeg: true`): an older server closes the link on a kind it does not know, and it also drops that
+// field, so with an older server or an older app the video stays as it was (kind 4). Same bounds in
+// src/robot-wire.ts and RobotLiveCore.swift.
+export const JPEG_HEAD=12,JPEG_MIN=100,JPEG_MAX=24000;
+// buffer: JPEG_HEAD bytes left empty by the host's encoder, then the JPEG. The header is written in place: no copy.
+export function jpegFrame(buffer,sequence,width,height){
+  if(!(buffer instanceof ArrayBuffer)||buffer.byteLength<JPEG_HEAD+JPEG_MIN||buffer.byteLength>JPEG_HEAD+JPEG_MAX||!Number.isInteger(sequence)||sequence<1||sequence>0xffffffff||!Number.isInteger(width)||!Number.isInteger(height)||width<1||width>320||height<1||height>240)throw Error('invalid_camera_frame');
+  const view=new DataView(buffer);
+  if(view.getUint16(JPEG_HEAD)!==0xffd8)throw Error('invalid_camera_frame');
+  view.setUint16(0,0x5242);view.setUint8(2,1);view.setUint8(3,8);view.setUint32(4,sequence);view.setUint16(8,width);view.setUint16(10,height);
+  return buffer;
+}
+// How finely the next picture is made, from the size of the last one: a picture that leaves in one go matters more
+// than its detail (the connection holds 11.4 KB; a picture is sent when 8 KB are free). Between JPEG_SMALL and
+// JPEG_LARGE the quality stays; above it goes down (at once by more when far above), below it goes up a step.
+export const JPEG_QUALITY=65,JPEG_QUALITY_MIN=30,JPEG_QUALITY_MAX=85,JPEG_SMALL=4200,JPEG_LARGE=6800;
+export const jpegQuality=(quality,bytes)=>bytes>JPEG_LARGE?Math.max(JPEG_QUALITY_MIN,quality-(bytes>JPEG_LARGE*1.4?15:5)):bytes<JPEG_SMALL?Math.min(JPEG_QUALITY_MAX,quality+5):quality;
 
 // Pieces of 4 KB, built one at a time as they are sent (9 Nov 2026: whole frames cut in 32 KB pieces, each copied
 // twice and all queued at once, used up the robot's fixed JavaScript memory and restarted it; with 8 KB pieces the

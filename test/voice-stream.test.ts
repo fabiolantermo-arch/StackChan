@@ -97,6 +97,8 @@ it('removes ElevenLabs voice tags from the text and asks the agent to wait for m
   const h=await setup('elevenlabs');const update=next(h.server,'contextual_update');
   h.server.send(JSON.stringify({type:'conversation_initiation_metadata'}));
   expect((await update).text).toMatch(/prima di ricevere il «Risultato gestione ricordi»/);
+  // 16 Nov 2026: a lively tone and a short lively sentence before a web search, at every call.
+  {const {ENERGY_RULE,SEARCH_SPEECH_RULE}=await import('../src/voice-stream'),text=(await update).text;expect(text).toContain(ENERGY_RULE);expect(text).toContain(SEARCH_SPEECH_RULE);}
   const reply=next(h.client,'agent_response');h.server.send(JSON.stringify({type:'agent_response',agent_response_event:{agent_response:'Sole [calm] e 14 gradi.'}}));
   expect((await reply).agent_response_event.agent_response).toBe('Sole e 14 gradi.');
   const closed=new Promise(resolve=>h.server.addEventListener('close',resolve,{once:true}));h.client.close();await closed;
@@ -239,14 +241,54 @@ it('moves the robot mouth like the iPhone app: opens in about 45 ms, closes in a
   expect([0,1,2,3,4,5,6].map(()=>mouth.pose(silent,step))).toEqual([3,2,2,1,1,1,0],'closes through the middle poses, never in one jump');
   const half=new MouthTrack();for(let i=0;i<20;i++)half.pose(new Int16Array(516).fill(1235),step);expect(half.value).toBeCloseTo(.35,2);expect(half.pose(new Int16Array(516).fill(1235),step)).toBe(2);
 });
-async function robotIma(){
-  const h=await setup('elevenlabs',[],'&sessionId=robot&audio=ima&mic=alaw');
+async function robotIma(more=''){
+  const h=await setup('elevenlabs',[],'&sessionId=robot&audio=ima&mic=alaw'+more);
   const frames:Uint8Array[]=[],other:string[]=[];h.client.binaryType='arraybuffer';
   h.client.addEventListener('message',e=>{if(e.data instanceof ArrayBuffer)frames.push(new Uint8Array(e.data));else other.push(JSON.parse(String(e.data)).type);});
   h.server.send(JSON.stringify({type:'conversation_initiation_metadata',conversation_initiation_metadata_event:{agent_output_audio_format:'pcm_16000'}}));
   return {...h,frames,other};
 }
 const base64Of=(pcm:Int16Array)=>{const bytes=new Uint8Array(pcm.buffer,pcm.byteOffset,pcm.byteLength);let text='';for(let i=0;i<bytes.length;i+=0x8000)text+=String.fromCharCode(...bytes.subarray(i,i+0x8000));return btoa(text);};
+it('chooses the shape of the lips from the letters ElevenLabs sends with the audio (16 Nov 2026)',async()=>{
+  // Owner: «nuove espressioni per migliorare movimenti labbra»: m/b/p, o, u, e/i, f/v.
+  const {LipTrack,LIPS}=await import('../src/robot-audio');
+  expect(LIPS).toEqual({none:0,pressed:1,round:2,narrow:3,wide:4,teeth:5});
+  const track=new LipTrack();
+  track.add(400,{chars:['M','o',' ','t','u','f','è','a'],char_start_times_ms:[0,80,160,200,240,280,320,360],char_durations_ms:[80,80,40,40,40,40,40,40]});
+  expect(track.shape(40,3)).toBe(1);expect(track.shape(40,0)).toBe(1); // pressed lips: also in the silence of the closing
+  expect(track.shape(120,3)).toBe(2);expect(track.shape(120,0)).toBe(0); // a vowel's shape only while there is sound
+  expect(track.shape(180,3)).toBe(0); // between two words
+  expect(track.shape(220,2)).toBe(3); // «t» takes the «u» after it
+  expect(track.shape(260,2)).toBe(3);expect(track.shape(300,2)).toBe(5);expect(track.shape(340,2)).toBe(4);
+  expect(track.shape(380,2)).toBe(0); // «a»: the mouth that follows the loudness
+  expect(track.byte(120,3)).toBe(3+2*16);expect(track.byte(180,4)).toBe(4);
+  // The next piece's letters come after the last piece's.
+  track.add(400,{chars:['i'],char_start_times_ms:[0],char_durations_ms:[100]});expect(track.shape(450,1)).toBe(4);expect(track.shape(50,3)).toBe(1);
+  // A long silence without letters: the letters' clock is set back on the audio's.
+  track.add(1000);track.add(200,{chars:['o'],char_start_times_ms:[0],char_durations_ms:[100]});
+  expect(track.shape(1850,1)).toBe(2);expect(track.shape(550,1)).toBe(0);
+  // Anything else than the three lists is left out and breaks nothing.
+  const odd=new LipTrack();
+  for(const bad of [null,'x',{},{chars:'o'},{chars:['o'],char_start_times_ms:['x'],char_durations_ms:[50]},{chars:['o'],char_start_times_ms:[0],char_durations_ms:[50,60]},{chars:[7],char_start_times_ms:[0],char_durations_ms:[50]},{chars:['o'],char_start_times_ms:[-5],char_durations_ms:[50]}])odd.add(100,bad);
+  for(let ms=0;ms<900;ms+=10)expect(odd.shape(ms,3)).toBe(0);
+  // A consonant with no vowel in its word, a digit, a sign: no shape.
+  const lone=new LipTrack();lone.add(300,{chars:['s',' ','7','!'],char_start_times_ms:[0,100,150,200],char_durations_ms:[100,50,50,50]});
+  for(const ms of [50,120,170,220])expect(lone.shape(ms,3)).toBe(0);
+});
+it('a robot that asks for the lips (&lips=1) gets the shape in every mouth pose; one that does not, the poses as before',async()=>{
+  const pcm=Int16Array.from({length:16000},(_,i)=>Math.round(6000*Math.sin(i*2*Math.PI*300/16000))); // 1 s, loud
+  const alignment={chars:['o','m','a'],char_start_times_ms:[0,400,700],char_durations_ms:[400,300,300]};
+  const poses=async(more:string)=>{
+    const h=await robotIma(more);
+    h.server.send(JSON.stringify({type:'audio',audio_event:{audio_base_64:base64Of(pcm),event_id:1,alignment}}));
+    await wait(40);const list=h.frames.flatMap(frame=>[...frame.subarray(2,2+frame[1])]);h.client.close();return list;
+  };
+  const plain=await poses(''),shaped=await poses('&lips=1');
+  expect(plain.length).toBe(30);expect(plain.every(pose=>pose>=1&&pose<=4)).toBe(true); // an old robot: nothing new in its frames
+  expect(shaped.map(byte=>byte&15)).toEqual(plain); // the loudness pose is the same
+  const step=516*1000/16000;
+  expect(shaped.map(byte=>byte>>4)).toEqual(plain.map((_,m)=>{const ms=(m+.5)*step;return ms<400?2:ms<700?1:0;}));
+});
 it('sends the robot whole IMA frames, the rest once the provider pauses, paced about a second ahead',async()=>{
   const {ROBOT_AUDIO}=await import('../src/voice-stream');
   const h=await robotIma(),pcm=Int16Array.from({length:16000},(_,i)=>Math.round(6000*Math.sin(i*2*Math.PI*300/16000))); // 1 s
@@ -299,7 +341,7 @@ it('the robot call opens with a greeting from the agent, after the context; the 
 
 it('speaks of itself in the feminine with the two girls and in the masculine with the white robot (owner, 9 Nov 2026)',async()=>{
   const {genderRule,robotGreeting,robotGreetingFor,ownerName,ROBOT_GREETING}=await import('../src/voice-stream');
-  expect(genderRule('portrait')).toMatch(/femminile.*pronta/);expect(genderRule('redhead')).toMatch(/femminile/);
+  expect(genderRule('portrait')).toMatch(/femminile.*pronta/);expect(genderRule('redhead')).toMatch(/femminile/);expect(genderRule('curly')).toMatch(/femminile/);
   expect(genderRule('white')).toMatch(/maschile.*pronto/);expect(genderRule('other')).toBe('');expect(genderRule(null)).toBe('');
   expect(robotGreeting('redhead')).toMatch(/^\(Inizio chiamata dal robot:.*Parla di te al femminile\.\)$/);
   expect(robotGreeting('white')).toMatch(/al maschile\.\)$/);expect(robotGreetingFor('Ada')).toMatch(/tu sei Robottino e io sono Ada, non chiamarmi Robottino.*comincia con «Ciao Ada!».*ogni volta diversa/);expect(ROBOT_GREETING).toMatch(/io sono la persona che ti parla.*comincia con «Ciao!»/);expect(ownerName({OWNER_NAME:' Ada «x»; DROP 123 '})).toBe('Ada x DROP');expect(ownerName(undefined)).toBe('');expect(ROBOT_GREETING).toMatch(/una volta sola.*non salutare di nuovo/);expect(robotGreeting(undefined)).toBe(ROBOT_GREETING);
@@ -322,4 +364,30 @@ it('speaks of itself in the feminine with the two girls and in the masculine wit
   expect(phone.messages.find(m=>m.type==='session.start').session.instructions).not.toContain(HEAD_RULE);
   const unknown=await setup('openai',[],'&face=%3Cscript%3E');await new Promise(r=>setTimeout(r,20));
   expect(unknown.messages.find(m=>m.type==='session.start').session.instructions).not.toMatch(/Aspetto|script/);
+});
+
+it('the robot is told when a web search for its call starts and ends; the app is not (12 Nov 2026)',async()=>{
+  const open=async(query:string,provider='elevenlabs')=>{
+    const pair=new WebSocketPair(),server=pair[1];server.accept();
+    vi.spyOn(globalThis,'fetch').mockImplementation(async input=>String(input).includes('get-signed-url')?Response.json({signed_url:'wss://api.elevenlabs.io/test'}):new Response(null,{status:101,webSocket:pair[0]}));
+    let tell:(active:boolean)=>void=()=>{};
+    const response=await voiceStream(new Request('https://test/api/voice?provider='+provider+query),env,[],()=>{},(_stop,searching)=>{tell=searching;});
+    const client=response.webSocket!;client.accept();const got:any[]=[];client.addEventListener('message',e=>{if(typeof e.data==='string')got.push(JSON.parse(e.data));});
+    return {server,client,got,tell:(active:boolean)=>tell(active),settle:()=>new Promise(r=>setTimeout(r,30))};
+  };
+  const robot=await open('&sessionId=robot&audio=ima&mic=alaw');
+  robot.tell(true);robot.tell(false);await robot.settle();
+  expect(robot.got.filter(m=>m.type==='robot.search')).toEqual([{type:'robot.search',active:true},{type:'robot.search',active:false}]);
+  robot.client.close(1000);await robot.settle();robot.tell(true); // a search that ends after the call: nothing, no error
+  vi.restoreAllMocks();
+  const app=await open('&sessionId=prova');app.tell(true);await app.settle();
+  expect(app.got.some(m=>m.type==='robot.search')).toBe(false);app.client.close(1000);
+  vi.restoreAllMocks();
+  // OpenAI searches by delegation: from the provider's own event until the answer starts to sound.
+  const live=await open('&sessionId=robot&audio=ima&mic=alaw','openai');
+  live.server.send(JSON.stringify({type:'session.delegation.created',delegation:{target:'responses'}}));await live.settle();
+  expect(live.got.filter(m=>m.type==='robot.search')).toEqual([{type:'robot.search',active:true}]);
+  live.server.send(JSON.stringify({type:'session.output_audio.delta',delta:'AAAAAAAA'}));await live.settle();
+  expect(live.got.filter(m=>m.type==='robot.search')).toEqual([{type:'robot.search',active:true},{type:'robot.search',active:false}]);
+  live.client.close(1000);
 });

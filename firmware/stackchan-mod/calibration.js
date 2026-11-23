@@ -66,7 +66,10 @@ export function reachable(rotation,cal=HOST_LIMITS){return rotationFromRaw(servo
 // the K151 micro servos follow with the head on them, so where the head should be stays where it really is. Measured
 // from where the head is, never less than MIN_MOVE seconds: one tick of the main loop, so a stream of small steps
 // (face following) ends each step as the next one starts.
-export const HEAD_SPEED=3,MIN_MOVE=.1;
+// 13 Nov 2026 (owner, with the robot following a face by itself: «metti al massimo la velocità dei servomotori»): 6 rad/s,
+// about 340° a second, so the time given to the servos is never what holds them back; what they really do with the
+// head on them is still to be measured on the robot.
+export const HEAD_SPEED=6,MIN_MOVE=.1;
 export function moveTime(from,to,minimum=MIN_MOVE){
   const d=Math.hypot(to.y-from.y,to.p-from.p);
   return Number.isFinite(d)?Math.max(minimum,d/HEAD_SPEED):NaN;

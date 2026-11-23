@@ -581,6 +581,8 @@ enum WiFiVault {
     @Published private(set) var onlineMessage = "Robot non ancora verificato."
     @Published private(set) var busy = false
     @Published private(set) var online = false
+    /// The robot's ENV III reading, while it is connected (15 Nov 2026).
+    @Published private(set) var climate: RobotClimate?
     /// Result of the last robot check, for the one-sentence status at the top of the Robot tab.
     enum Reach { case unchecked, online, virtual, unreachable, failed }
     @Published private(set) var reach = Reach.unchecked
@@ -601,11 +603,21 @@ enum WiFiVault {
     private let save: (RobotWiFiProfiles) throws -> Void
     private let remove: () throws -> Void
     private var revision = UUID()
+    /// The saved profiles have been read at least once. Until then a save could overwrite profiles the screen never
+    /// showed (code review, 19 Nov 2026: read with the iPhone locked, the saved hotspot was lost on the next save).
+    private var loaded = false
     init(load: @escaping () throws -> RobotWiFiProfiles = WiFiVault.load, save: @escaping (RobotWiFiProfiles) throws -> Void = WiFiVault.save, remove: @escaping () throws -> Void = WiFiVault.remove) {
         self.load = load; self.save = save; self.remove = remove
-        do { profiles = try load(); if profiles.hotspot.ssid.isEmpty && profiles.hotspot.password.isEmpty { profiles.hotspot.ssid = RobotWiFiProfiles.defaultHotspot } } catch { message = "Impossibile leggere i profili dal Portachiavi. Riprova quando l’iPhone è sbloccato." }
+        do { profiles = try load(); loaded = true; if profiles.hotspot.ssid.isEmpty && profiles.hotspot.password.isEmpty { profiles.hotspot.ssid = RobotWiFiProfiles.defaultHotspot } } catch { message = "Impossibile leggere i profili dal Portachiavi. Riprova quando l’iPhone è sbloccato." }
     }
     @discardableResult func saveOnPhone() -> Bool {
+        if !loaded {
+            // Read now: what was not typed comes from the saved profiles, never blanked over them.
+            guard let saved = try? load() else { message = "Sblocca l’iPhone: non ho ancora letto i profili salvati, quindi non salvo per non cancellarli."; return false }
+            loaded = true
+            if profiles.home.ssid.isEmpty && profiles.home.password.isEmpty { profiles.home = saved.home }
+            if profiles.hotspot.password.isEmpty && (profiles.hotspot.ssid.isEmpty || profiles.hotspot.ssid == RobotWiFiProfiles.defaultHotspot) && !saved.hotspot.empty { profiles.hotspot = saved.hotspot }
+        }
         guard profiles.valid else { message = "Controlla nome rete e password. Usa password di almeno 8 caratteri e nomi diversi per casa e hotspot."; return false }
         do { try save(profiles); message = "Profili salvati nel Portachiavi dell’iPhone. Non ancora inviati al robot."; return true }
         catch { message = "Salvataggio nel Portachiavi non riuscito."; return false }
@@ -619,6 +631,8 @@ enum WiFiVault {
     func restorePasswords() {
         do {
             let saved = try load()
+            // Never read before: the whole saved profiles, names too.
+            if !loaded { loaded = true; profiles = saved; if profiles.hotspot.ssid.isEmpty && profiles.hotspot.password.isEmpty { profiles.hotspot.ssid = RobotWiFiProfiles.defaultHotspot }; return }
             if profiles.home.ssid == saved.home.ssid { profiles.home.password = saved.home.password }
             if profiles.hotspot.ssid == saved.hotspot.ssid { profiles.hotspot.password = saved.hotspot.password }
         } catch { message = "Sblocca l’iPhone per recuperare le password salvate." }
@@ -628,14 +642,15 @@ enum WiFiVault {
         guard !store.token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { onlineMessage = "Configura il token in Collegamento sicuro, in fondo alla scheda."; return }
         busy = true; let current = revision
         defer { if revision == current { busy = false } }
-        struct Status: Decodable { var connected: Bool; var simulated: Bool? }
+        struct Status: Decodable { var connected: Bool; var simulated: Bool?; var climate: RobotClimate? }
         do {
             let status = try JSONDecoder().decode(Status.self, from: await store.request("api/robot/status"))
             guard revision == current else { return }
             online = status.connected && status.simulated != true
+            climate = online ? status.climate : nil
             reach = status.simulated == true ? .virtual : online ? .online : .unreachable
             onlineMessage = status.simulated == true ? "È online un dispositivo virtuale di prova." : online ? "Robot raggiungibile via internet. Il nome della rete usata non è ancora verificabile." : "Robot non raggiungibile dal servizio. Verifica alimentazione, configurazione e rete."
-        } catch { guard revision == current else { return }; online = false; reach = .failed; onlineMessage = "Controllo robot non riuscito. Verifica il collegamento sicuro e internet." }
+        } catch { guard revision == current else { return }; online = false; climate = nil; reach = .failed; onlineMessage = "Controllo robot non riuscito. Verifica il collegamento sicuro e internet." }
     }
 }
 
@@ -661,17 +676,28 @@ struct RobotHome: View {
     var body: some View {
         TabView(selection: $selectedTab) {
             NavigationStack { Form {
-                Section("Stato") {
+                Section {
                     Text(networkSetup.summary(for: store))
-                    Button("Controlla robot online") { Task { await networkSetup.check(using: store) } }.disabled(networkSetup.busy)
                     if networkSetup.busy || store.busy { ProgressView() }
                 }
+                RobotLinkSection()
+                RobotRemoteSwitch(title: "Movimenti della testa", action: "motions", statusKey: "motionEnabled",
+                                  confirmedOn: "Confermato: movimenti attivi.", confirmedOff: "Confermato: movimenti spenti, anche dopo un riavvio.",
+                                  refused: "Il robot non accende i movimenti: nel suo menu «Calibrazione» o «Hardware» risulta spento. Rifai la calibrazione dal menu del robot.")
+                RobotRemoteSwitch(title: "Inseguimento con rover", action: "roverFollow", statusKey: "roverFollow", needs: "rover",
+                                  needsNote: "Serve il rover acceso dal menu del robot («Rover: sì») e il sensore di distanza VL53L0X sulla porta A.",
+                                  confirmedOn: "Confermato: il robot ti segue con la testa e con il rover.", confirmedOff: "Confermato: inseguimento con rover spento.",
+                                  refused: "Il robot non l’ha acceso: servono rover, sensore di distanza VL53L0X e testa calibrata.")
                 Section("Conversazione") {
                     Toggle("Segui il mio viso mentre parliamo", isOn: $conversationFollow.enabled)
-                    Text(conversationFollow.note).font(.caption)
-                    Text("Con l’app aperta, quando parli con il robot la sua camera manda piccole immagini all’iPhone, che trova il tuo viso e gli dice dove girare la testa. Le immagini non vengono salvate. Si ferma a fine conversazione, chiudendo l’app o aprendo Live e Test.").font(.caption)
                 }
-                RobotPairingSection()
+                // Owner, 21 Nov 2026: «un interruttore nella scheda robot per far partire la chiamata dopo 10 secondi che
+                // mi guarda fisso». The robot counts the 10 s with its own camera; the switch shows what it saved.
+                RobotRemoteSwitch(title: "Chiamata se mi guardi per 10 secondi", action: "gazeCall", statusKey: "gazeCall",
+                                  confirmedOn: "Confermato: se guardi il robot per 10 secondi parte la conversazione.",
+                                  confirmedOff: "Confermato: la conversazione parte solo come prima.",
+                                  refused: "Il robot non l’ha salvato. Riprova.")
+                RobotVolumeSection()
                 RobotNetworkSection(setup: networkSetup)
                 Section("Collegamento sicuro") {
                     SecureField("Token Robottino", text: $store.token).textInputAutocapitalization(.never).autocorrectionDisabled().focused($focusedField, equals: .token)
@@ -679,7 +705,8 @@ struct RobotHome: View {
                     if !actionMessage.isEmpty { Text(actionMessage).font(.caption) }
                     Text("Il token resta nel Portachiavi di questo iPhone. Le chiavi OpenAI ed ElevenLabs restano sul server.").font(.caption)
                 }
-            }.disabled(store.busy).scrollDismissesKeyboard(.interactively).navigationTitle("Robottino")
+                RobotPairingSection()
+            }.disabled(store.busy).scrollDismissesKeyboard(.interactively).navigationTitle(RobotClimate.title(networkSetup.climate))
                 .toolbar { ToolbarItemGroup(placement: .keyboard) { Spacer(); Button("Chiudi tastiera") { focusedField = nil; UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil) } } }
             }.tabItem { Label("Robot", systemImage: "face.smiling") }.tag(0)
             RobotAppearancePanel()
@@ -690,10 +717,316 @@ struct RobotHome: View {
                 .tabItem { Label("Test", systemImage: "slider.horizontal.3") }.tag(2)
         }.onChange(of: selectedTab) { focusedField = nil }
             .task { if RobotFaceStyle(rawValue: selectedFaceStyle) == nil { selectedFaceStyle = RobotFaceStyle.portrait.rawValue }; conversationFollow.resume(store: store); await store.restoreConnection(); if store.connected { await networkSetup.check(using: store) } }
+            // Temperature and humidity change slowly: the status again every minute while the app is open.
+            .task { while !Task.isCancelled { try? await Task.sleep(nanoseconds: 60_000_000_000); if scenePhase == .active, store.connected { await networkSetup.check(using: store) } } }
+            .task { RobotSharedLink.shared.update(token: store.token, active: scenePhase == .active) }
+            .onChange(of: store.token) { _, token in RobotSharedLink.shared.update(token: token, active: scenePhase == .active) }
             .onChange(of: scenePhase) { _, phase in
+                RobotSharedLink.shared.update(token: store.token, active: phase == .active)
                 if phase == .active { conversationFollow.resume(store: store); Task { await store.restoreConnection(); if store.connected { await networkSetup.check(using: store) } } }
                 if phase == .background { conversationFollow.pause() }
             }
+    }
+}
+
+/// The robot's speaker volume (owner, 15 Nov 2026). Letting go of the slider sends the level over a short Live link,
+/// as «Aspetto» does for the face; «Confermato» only when the robot answers that the amplifier took it and saved it.
+struct RobotVolumeSection: View {
+    @EnvironmentObject var store: RobotStore
+    @Environment(\.scenePhase) private var scenePhase
+    @AppStorage("robot.volume") private var level = RobotVolume.standard
+    @StateObject private var client = RobotLiveClient()
+    @State private var draft = Double(RobotVolume.standard)
+    @State private var applying = false
+    @ObservedObject private var gate = RobotQuickGate.shared
+    @State private var message = ""
+    var body: some View {
+        Section("Volume del robot") {
+            HStack {
+                Image(systemName: "speaker.fill").foregroundStyle(.secondary)
+                Slider(value: $draft, in: Double(RobotVolume.levels.lowerBound)...Double(RobotVolume.levels.upperBound), step: 1) { editing in
+                    if !editing { Task { await apply(Int(draft)) } }
+                }.accessibilityLabel("Volume del robot").accessibilityValue("\(Int(draft)) su 10")
+                Image(systemName: "speaker.wave.3.fill").foregroundStyle(.secondary)
+            }.disabled(applying || gate.busy || store.token.isEmpty)
+            Text("Livello \(Int(draft)) su 10").monospacedDigit()
+            if applying { ProgressView("Collegamento al robot…") }
+            if !message.isEmpty { Text(message).font(.caption) }
+        }
+        .onAppear { if RobotVolume.levels.contains(level) { draft = Double(level) } else { level = RobotVolume.standard; draft = Double(level) } }
+        .onChange(of: scenePhase) { _, phase in if phase == .background { client.disconnect() } }
+    }
+    @MainActor private func apply(_ chosen: Int) async {
+        guard !applying, !gate.busy, let values = RobotVolume.command(chosen) else { draft = Double(level); return }
+        applying = true; gate.busy = true; defer { applying = false; gate.busy = false; client.disconnect() }
+        do {
+            try await robotQuickCommand(client, token: store.token, action: "volume", values: values, active: { scenePhase == .active }) { message = $0 }
+            level = chosen
+            message = "Confermato: volume \(chosen) su 10 sul robot."
+        } catch {
+            draft = Double(level)
+            message = "Volume non cambiato sul robot (ultimo livello confermato: \(level) su 10). Verifica che sia acceso e collegato, poi riprova."
+        }
+    }
+}
+
+/// One short Live link for a single setting of the Robot tab (volume, motions): connects, waits for the robot up to
+/// 15 s (after each use of the app it needs a few seconds to reconnect, as for the face), checks it is the real,
+/// verified robot and sends the command; it throws unless the robot acknowledged it. The caller disconnects.
+/// One quick command at a time from the Robot tab (code review, 15 Nov 2026): volume and the switches each open their
+/// own link, and the relay takes one app at a time, so a second one started meanwhile cut the first off half way.
+@MainActor final class RobotQuickGate: ObservableObject {
+    static let shared = RobotQuickGate()
+    @Published var busy = false
+}
+
+/// The link to the robot and its two switches, in the Robot tab above «Movimenti della testa» (owner, 15 Nov 2026:
+/// «sposta la sezione robot collegato, collega da solo e riconosce i gesti da solo nella scheda robot»; it was at the
+/// top of Studio). With «Collega da solo» off, the button connects and disconnects by hand.
+struct RobotLinkSection: View {
+    @EnvironmentObject var store: RobotStore
+    @ObservedObject private var link = RobotSharedLink.shared
+    @ObservedObject private var live = RobotSharedLink.shared.client
+    @ObservedObject private var gestures = RobotSharedLink.shared.gestureMedia
+    var body: some View {
+        Section {
+            HStack {
+                Text(live.message)
+                Spacer()
+                if !link.enabled {
+                    if live.socketConnected { Button("Scollega") { live.disconnect() }.buttonStyle(.bordered) }
+                    else { Button("Collega al robot") { live.connect(token: store.token) }.buttonStyle(.borderedProminent).disabled(store.token.isEmpty) }
+                }
+            }
+            if live.status?.simulated == true { Label("Dispositivo virtuale di prova", systemImage: "testtube.2") }
+            Toggle("Collega da solo quando apro l’app", isOn: $link.enabled)
+            Toggle("Riconosci i gesti da solo", isOn: $link.gestures).disabled(!link.enabled)
+            if link.enabled, link.gestures, gestures.gesturing {
+                if !gestures.gestureNote.isEmpty { Text(gestures.gestureNote) }
+                if !gestures.gestureSeen.isEmpty { Text(gestures.gestureSeen).font(.caption) }
+            }
+            Toggle("Aiuta il robot a seguirmi", isOn: $link.followHelp).disabled(!link.enabled)
+            Toggle("Riconosci viso e oggetti da solo", isOn: $link.sight).disabled(!link.enabled)
+            if link.enabled, link.sight {
+                HStack {
+                    TextField("Il tuo nome", text: $link.ownerName).textInputAutocapitalization(.words).autocorrectionDisabled()
+                    Button(gestures.enrolLeft > 0 ? "Guardami… \(gestures.enrolLeft)" : link.ownerPictures > 0 ? "Rifai" : "Questo sono io") { link.enrol() }
+                        .buttonStyle(.bordered).disabled(RobotSight.name(link.ownerName) == nil || !gestures.sighting || gestures.enrolLeft > 0)
+                }
+                if link.ownerPictures > 0 { Button("Dimentica il mio viso", role: .destructive) { link.forget() } }
+                if gestures.sighting, !gestures.sightNote.isEmpty { Text(gestures.sightNote).font(.caption) }
+                Text("Scrivi il tuo nome, mettiti davanti al robot e tocca «Questo sono io»: l’iPhone tiene cinque immagini del tuo viso, solo su questo telefono. È una somiglianza tra immagini, non una prova di chi sei: può sbagliare. Quando ti riconosce il robot sorride e saluta; gli oggetti che vede sono scritti solo qui.").font(.caption)
+            }
+        }
+    }
+}
+
+/// The app's own link to the robot (owner, 15 Nov 2026: «appena apro l'app si connette al robot automaticamente»):
+/// one client for the whole app, used by Studio (rover, Live, dances) and by the Robot tab's quick commands. It opens
+/// by itself while the app is in front (RobotAutoLink), closes in the background, and steps aside when another page
+/// (Test, Aspetto) opens its own, coming back when that one is gone. Off: «Collega al robot» by hand, as before.
+@MainActor final class RobotSharedLink: ObservableObject {
+    static let shared = RobotSharedLink()
+    let client = RobotLiveClient()
+    @Published var enabled: Bool { didSet { UserDefaults.standard.set(enabled, forKey: RobotAutoLink.enabledKey); failures = 0; nextTry = .distantPast; if !enabled { client.disconnect() } } }
+    /// Hand gestures by themselves while the link is up (RobotAutoLink.wantsGestures): the robot's video is asked for
+    /// and looked at here, without opening the Live page. The Live page takes the video for itself while it is open.
+    @Published var gestures: Bool { didSet { UserDefaults.standard.set(gestures, forKey: RobotAutoLink.gesturesKey) } }
+    /// A smile, the owner's face and things shown to the camera, on the same video (RobotSight, 15 Nov 2026).
+    @Published var sight: Bool { didSet { UserDefaults.standard.set(sight, forKey: RobotAutoLink.sightKey) } }
+    /// The iPhone tells the robot where the face is when the robot's own detector loses it (RobotFollowHelp).
+    @Published var followHelp: Bool { didSet { UserDefaults.standard.set(followHelp, forKey: RobotFollowHelp.key) } }
+    private var helpAt = 0.0
+    private func help(_ frame: UInt32, _ x: Double, _ y: Double) {
+        let now = ProcessInfo.processInfo.systemUptime
+        guard RobotFollowHelp.shouldSend(enabled: followHelp, ready: client.ready, motion: client.status?.motionEnabled == true, pending: client.pendingCount, frame: frame, since: now - helpAt) else { return }
+        helpAt = now
+        // An answer the robot does not need (it sees the face itself, or the frame is old) is simply refused.
+        Task { @MainActor in try? await self.client.command("track", values: ["frameId": Int(frame), "x": x, "y": y]) }
+    }
+    private var handSentAt = 0.0
+    /// The Force following the hand: where the hand is, to the robot (RobotForceHand).
+    private func handAt(_ x: Double) {
+        let now = ProcessInfo.processInfo.systemUptime
+        guard RobotForceHand.shouldSend(following: client.status?.forceFollow == true, ready: client.ready, pending: client.pendingCount, x: x, since: now - handSentAt) else { return }
+        handSentAt = now
+        Task { @MainActor in try? await self.client.command("hand", values: ["x": x]) }
+    }
+    /// «Questo sono io»: the name and the saved pictures of the owner's face. They stay on this iPhone.
+    @Published var ownerName: String { didSet { UserDefaults.standard.set(ownerName, forKey: RobotAutoLink.ownerNameKey); gestureMedia.ownerName = RobotSight.name(ownerName) } }
+    @Published private(set) var ownerPictures = 0
+    private var ownerPrints: [Data] { didSet { UserDefaults.standard.set(ownerPrints, forKey: RobotAutoLink.ownerPrintsKey); gestureMedia.ownerPrints = ownerPrints; ownerPictures = ownerPrints.count } }
+    /// Takes the next pictures of the face in front of the robot as the owner's (the old ones are forgotten first).
+    func enrol() { ownerPrints = []; gestureMedia.enrolLeft = RobotSight.enrolPictures }
+    func forget() { gestureMedia.enrolLeft = 0; ownerPrints = [] }
+    let gestureMedia = RobotPhoneMedia()
+    private var gesturesOn = false, gesturesStarting = false, gesturesRetry = Date.distantPast, liveOpen = false
+    private var loop: Task<Void, Never>?
+    private var failures = 0, nextTry = Date.distantPast, token = "", active = false, heldOut = false
+    private init() {
+        enabled = UserDefaults.standard.object(forKey: RobotAutoLink.enabledKey) as? Bool ?? true
+        gestures = UserDefaults.standard.object(forKey: RobotAutoLink.gesturesKey) as? Bool ?? true
+        sight = UserDefaults.standard.object(forKey: RobotAutoLink.sightKey) as? Bool ?? true
+        followHelp = UserDefaults.standard.object(forKey: RobotFollowHelp.key) as? Bool ?? true
+        ownerName = UserDefaults.standard.string(forKey: RobotAutoLink.ownerNameKey) ?? ""
+        ownerPrints = UserDefaults.standard.array(forKey: RobotAutoLink.ownerPrintsKey) as? [Data] ?? []
+        gestureMedia.ownerName = RobotSight.name(ownerName); gestureMedia.ownerPrints = ownerPrints; ownerPictures = ownerPrints.count
+        gestureMedia.onEnrolled = { [weak self] print in self?.ownerPrints.append(print) }
+        gestureMedia.onFaceAt = { [weak self] frame, x, y in self?.help(frame, x, y) }
+        gestureMedia.onSight = { [weak self] kind, text in
+            guard let self else { return }
+            Task { @MainActor in
+                var values: [String: Any] = ["kind": kind.rawValue]; if let text { values["text"] = text }
+                do { try await self.client.command("sight", values: values) }
+                catch { self.gestureMedia.sightNote = "Il robot non ha reagito: \(error.localizedDescription)" }
+            }
+        }
+        gestureMedia.onHandAt = { [weak self] x in self?.handAt(x) }
+        gestureMedia.onGesture = { [weak self] kind in
+            guard let self, self.client.status?.exploring != true else { return }
+            Task { @MainActor in
+                do { try await self.client.command("gesture", values: ["name": kind.rawValue]) }
+                catch { self.gestureMedia.gestureNote = "Gesto «\(RobotGestureWatch.label(kind))» non eseguito: \(error.localizedDescription)" }
+            }
+        }
+        RobotLiveClient.beforeOtherConnect = { [weak self] other in
+            guard let self, other !== self.client, self.client.linkOpen else { return false }
+            self.client.disconnect(); self.client.message = "In pausa: un’altra pagina usa il collegamento."; return true
+        }
+    }
+    /// From the app's root: the saved token and whether the app is in front.
+    func update(token: String, active: Bool) {
+        self.token = token.trimmingCharacters(in: .whitespacesAndNewlines); self.active = active
+        if !active { client.disconnect(); client.forgetCloseReason(); failures = 0; nextTry = .distantPast; heldOut = false }
+        if loop == nil { loop = Task { [weak self] in while !Task.isCancelled { self?.turn(); try? await Task.sleep(nanoseconds: 1_000_000_000) } } }
+    }
+    /// The Live page is opening: the video and the gestures are its own while it is open.
+    func liveOpened() { liveOpen = true; stopGestures(tellRobot: true) }
+    func liveClosed() { liveOpen = false }
+    private func stopGestures(tellRobot: Bool) {
+        guard gesturesOn || gestureMedia.gesturing || gestureMedia.sighting else { return }
+        gesturesOn = false; gestureMedia.stopGestures(); gestureMedia.stopSight(); gestureMedia.robotImage = nil; client.onVideo = nil
+        if tellRobot, client.ready { Task { @MainActor in try? await self.client.command("camera.stop") } }
+    }
+    private func gestureTurn() {
+        gestureMedia.exploringIdentity = client.status?.exploring == true
+        let handGestures = RobotExploreKey.allowsGestures(enabled: gestures, exploring: client.status?.exploring == true)
+        if !client.socketConnected { if gesturesOn { stopGestures(tellRobot: false) }; return }
+        // The video is asked for when either the gestures or the face and things are wanted; each can be switched while it runs.
+        // The face is looked for when its smile, owner and things are wanted, or only to help the robot follow it.
+        let seeing = sight || followHelp
+        let want = RobotAutoLink.wantsGestures(link: enabled, gestures: handGestures || seeing, liveOpen: liveOpen, ready: client.ready, camera: client.status?.camera == true)
+        if !want { if gesturesOn { stopGestures(tellRobot: true) }; return }
+        if gesturesOn {
+            if handGestures != gestureMedia.gesturing { if handGestures { gestureMedia.startGestures() } else { gestureMedia.stopGestures() } }
+            if seeing != gestureMedia.sighting { if seeing { gestureMedia.startSight() } else { gestureMedia.stopSight() } }
+            gestureMedia.sightEvents = sight
+        }
+        guard !gesturesOn, !gesturesStarting, Date() >= gesturesRetry else { return }
+        gesturesStarting = true
+        Task { @MainActor in
+            defer { self.gesturesStarting = false }
+            do {
+                try await self.client.command("camera.start", values: RobotLiveClient.cameraStart)
+                guard !self.liveOpen, self.client.ready else { return }
+                self.client.onVideo = { [weak self] packet in self?.gestureMedia.video(packet) }
+                if RobotExploreKey.allowsGestures(enabled: self.gestures, exploring: self.client.status?.exploring == true) { self.gestureMedia.startGestures() }
+                if self.sight || self.followHelp { self.gestureMedia.startSight() }
+                self.gestureMedia.sightEvents = self.sight
+                self.gesturesOn = true
+            } catch { self.gesturesRetry = Date().addingTimeInterval(10) } // the robot's camera is busy (a conversation starting, a photo): later
+        }
+    }
+    private func turn() {
+        gestureTurn()
+        if client.socketConnected { failures = 0; return }
+        if !RobotAutoLink.takesBack(after: client.closeReason) { heldOut = true }
+        if heldOut { return }
+        let others = RobotLiveClient.pageClients - (client.isCounted ? 1 : 0)
+        guard RobotAutoLink.shouldConnect(enabled: enabled, active: active, hasToken: token.count >= 32, open: client.linkOpen, otherPages: others, busy: RobotQuickGate.shared.busy), Date() >= nextTry else { return }
+        nextTry = Date().addingTimeInterval(RobotAutoLink.delay(failures: failures)); failures += 1
+        client.connect(token: token)
+    }
+}
+
+/// Sends one command and gives back the client that carried it: the app's shared link when it is connected to the
+/// robot, otherwise `client`, connected for the occasion.
+@discardableResult @MainActor func robotQuickCommand(_ client: RobotLiveClient, token: String, action: String, values: [String: Any], active: () -> Bool, note: (String) -> Void) async throws -> RobotLiveClient {
+    let shared = RobotSharedLink.shared.client
+    if shared.ready, shared.status?.hardwareVerified == true, shared.status?.simulated != true { try await shared.command(action, values: values); return shared }
+    note("Collegamento al robot in corso…")
+    client.connect(token: token)
+    for step in 0..<150 {
+        if client.ready { break }
+        if step == 30 { note("Attendo che il robot si ricolleghi…") }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        guard active() else { throw RobotLiveError.offline }
+    }
+    guard client.ready, client.status?.hardwareVerified == true, client.status?.simulated != true else { throw RobotLiveError.offline }
+    try await client.command(action, values: values)
+    return client
+}
+
+/// A switch of the Robot tab that the robot keeps (owner, 15 Nov 2026): «Movimenti della testa» (`motions`, status
+/// `motionEnabled`) and «Inseguimento con rover» (`roverFollow`, status `roverFollow`). A short Live link sends it; the
+/// switch then shows what the robot says in its status, never just the wish.
+struct RobotRemoteSwitch: View {
+    let title: String
+    let action: String
+    let statusKey: String
+    var needs: String? = nil      // a status key that must be true for the switch to be usable (e.g. «rover»)
+    var needsNote = ""
+    var confirmedOn = "Confermato: acceso."
+    var confirmedOff = "Confermato: spento."
+    var refused = "Il robot non l’ha acceso."
+    @EnvironmentObject var store: RobotStore
+    @Environment(\.scenePhase) private var scenePhase
+    @StateObject private var client = RobotLiveClient()
+    @State private var on: Bool?
+    @State private var usable = true
+    @State private var applying = false
+    @ObservedObject private var gate = RobotQuickGate.shared
+    @State private var message = ""
+    var body: some View {
+        Section {
+            Toggle(title, isOn: Binding(get: { on ?? false }, set: { value in Task { await apply(value) } }))
+                .disabled(applying || gate.busy || on == nil || store.token.isEmpty || (!usable && on != true))
+            if applying { ProgressView("Collegamento al robot…") }
+            if on == nil, !applying { Text("Stato non ancora letto: il robot deve essere acceso e collegato.").font(.caption) }
+            if on != nil, !usable, on != true, !needsNote.isEmpty { Text(needsNote).font(.caption) }
+            if !message.isEmpty { Text(message).font(.caption) }
+        }
+        .task { await read() }
+        .onChange(of: scenePhase) { _, phase in if phase == .active { Task { await read() } } else if phase == .background { client.disconnect() } }
+        // Another command of this tab has just ended: the robot's state may have changed here too (following with the
+        // rover switches the head's motions on).
+        .onChange(of: gate.busy) { _, busy in if !busy { Task { await read() } } }
+    }
+    /// What the robot says now, from the service (the same status as the line at the top).
+    @MainActor private func read() async {
+        guard !applying, !store.token.isEmpty, let data = try? await store.request("api/robot/status"),
+              let status = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return }
+        guard status["connected"] as? Bool == true else { on = nil; return }
+        on = status[statusKey] as? Bool ?? false
+        usable = needs.map { status[$0] as? Bool == true } ?? true
+    }
+    @MainActor private func apply(_ wanted: Bool) async {
+        guard !applying, !gate.busy else { return }
+        applying = true; gate.busy = true; defer { applying = false; gate.busy = false; client.disconnect() }
+        do {
+            let used = try await robotQuickCommand(client, token: store.token, action: action, values: ["on": wanted], active: { scenePhase == .active }) { message = $0 }
+            // Switching on can take a moment (the motors answer): wait up to 8 s for the robot's own status.
+            let current: () -> Bool? = { used.status?.switchState(statusKey) }
+            for _ in 0..<RobotRemoteSwitchNote.waitSteps where current() != wanted { try await Task.sleep(nanoseconds: 100_000_000) }
+            let state = current()
+            on = state ?? on
+            message = RobotRemoteSwitchNote.text(wanted: wanted, state: state, confirmedOn: confirmedOn, confirmedOff: confirmedOff)
+        } catch RobotLiveError.rejected where wanted {
+            message = refused
+        } catch {
+            // The real reason too: «non riesco ad abilitare i movimenti» could not be understood from the old text alone.
+            message = "Non cambiato: \(error.localizedDescription) Verifica che il robot sia acceso e collegato, poi riprova."
+        }
     }
 }
 
@@ -837,27 +1170,30 @@ struct StudioConnectionBar: View {
 }
 struct RobotStudioPanel: View {
     @Environment(\.scenePhase) private var scenePhase
+    @EnvironmentObject var store: RobotStore
     @StateObject private var studio = RobotStudio()
+    /// One link to the robot for the whole Studio (owner, 15 Nov 2026): used by the rover keys below the menu, by the
+    /// Live page and by «Esegui sul robot». It is the app's shared link (RobotSharedLink), which opens by itself when
+    /// the app is opened; with that switched off, «Collega al robot» opens it by hand, as before.
+    @ObservedObject private var live = RobotSharedLink.shared.client
     var body: some View {
         NavigationStack {
             List {
-                Section {
-                    Text("Crea e prova il carattere di Robottino").font(.headline)
-                    Text("Danze, espressioni e simulatore funzionano in locale. Live permette il collegamento al robot.").font(.caption).foregroundStyle(.secondary)
-                }
                 NavigationLink { StudioDanceEditor() } label: { Label("Editor danze", systemImage: "music.note.list") }
                 NavigationLink { StudioExpressionLibrary() } label: { Label("Espressioni", systemImage: "face.smiling") }
                 NavigationLink { StudioConnectionSimulator() } label: { Label("Simulatore collegamento", systemImage: "point.3.connected.trianglepath.dotted") }
                 NavigationLink { RobotLivePanel() } label: { Label("Live", systemImage: "video") }
                 NavigationLink { RobotMemoriesPanel() } label: { Label("Ricordi", systemImage: "brain.head.profile") }
+                RobotExplorePad(live: live)
+                RobotRoverPad(live: live)
                 Section("Parla con Robottino") {
                     NavigationLink { RobotVoicePanel() } label: { Label("Conversazione vocale", systemImage: "waveform") }
                     Text("Con microfono e altoparlante dell’iPhone, anche senza robot.").font(.caption)
                 }
             }.navigationTitle("Studio Robottino")
-        }.environmentObject(studio)
+        }.environmentObject(studio).environmentObject(live)
             .onDisappear { studio.leave() }
-            .onChange(of: scenePhase) { _, phase in if phase != .active { studio.leave() } }
+            .onChange(of: scenePhase) { _, phase in if phase != .active { studio.leave() }; if phase == .background { live.disconnect() } }
     }
 }
 struct StudioDanceFile: FileDocument {
@@ -887,6 +1223,8 @@ struct StudioPlaybackControls: View {
 struct StudioDanceEditor: View {
     @EnvironmentObject var studio: RobotStudio
     @EnvironmentObject var store: RobotStore
+    /// Studio's link («Collega al robot»): when open, the dance goes on it (the relay takes one app at a time).
+    @EnvironmentObject var live: RobotLiveClient
     @StateObject private var robotDance = RobotDanceSender()
     @AppStorage("robot.face.style") private var faceStyle = "portrait"
     @FocusState private var nameFocused: Bool
@@ -928,7 +1266,7 @@ struct StudioDanceEditor: View {
             }
             Section("Robot vero") {
                 if robotDance.running { Button("Ferma sul robot", role: .destructive) { robotDance.stop() } }
-                else { Button("Esegui sul robot") { nameFocused = false; studio.stop(); robotDance.play(studio.draft, token: store.token) }.disabled(studio.playing || store.token.isEmpty) }
+                else { Button("Esegui sul robot") { nameFocused = false; studio.stop(); robotDance.play(studio.draft, token: store.token, shared: live) }.disabled(studio.playing || store.token.isEmpty) }
                 if robotDance.running { ProgressView() }
                 Text(robotDance.message).font(.caption)
                 Text("Invia i passi così come sono nell’editor (anche se non salvati). Musica e luci restano sull’iPhone. Chiudere la pagina o l’app ferma la danza.").font(.caption).foregroundStyle(.secondary)
@@ -1107,16 +1445,6 @@ struct RobotTestPanel: View {
                     // Read on entering the page (owner, 9 Nov 2026: no «Verifica il robot» button).
                     if tests.busy { ProgressView(tests.driving ? "Collegamento…" : "Verifica in corso…") }
                 }
-                Section("Modalità di prova") {
-                    Toggle("Simulazione dei movimenti", isOn: $tests.simulation).disabled(tests.driving)
-                    if tests.driving {
-                        Button("Ferma il robot", role: .destructive) { tests.stopDriving() }
-                    } else {
-                        Button("Muovi il robot vero") { Task { await tests.startDriving(using: store) { scenePhase == .active } } }
-                            .disabled(tests.simulation || tests.busy || store.token.isEmpty)
-                    }
-                    Text(tests.simulation ? "Anteprima sul telefono. Non muove il robot e non usa la sua telecamera." : tests.canDrive ? "Il joystick muove la testa del robot vero, un comando alla volta, con la stessa conferma di Live." : "«Muovi il robot vero» verifica da solo il robot; servono hardware verificato, calibrazione e movimenti attivi sul robot.").font(.caption)
-                }
                 Section("Movimenti della testa") {
                     VStack(spacing: 18) {
                         Image(systemName: "face.smiling.fill")
@@ -1129,17 +1457,18 @@ struct RobotTestPanel: View {
                         Text("Testa: \(tests.yaw == 0 ? "dritta" : "\(abs(tests.yaw))° \(tests.yaw > 0 ? "a destra" : "a sinistra")") · \(tests.pitch == 0 ? "non alzata" : "\(abs(tests.pitch))° in su")").monospacedDigit().font(.caption)
                         // Up on the stick lifts the head (negative pitch, as on the robot).
                         // The knob stays where it is let go (owner, 9 Nov 2026); «Testa dritta» brings it back.
-                        RobotJoystick(enabled: tests.simulation || tests.driving, knob: $knob) { x, y in tests.move(x: x, y: y) }
+                        RobotJoystick(enabled: tests.driving, knob: $knob) { x, y in tests.move(x: x, y: y) }
                     }.frame(maxWidth: .infinity)
-                    Button(tests.driving ? "Testa dritta" : "Ferma simulazione", role: .destructive) { knob = .zero; if tests.driving { tests.move(x: 0, y: 0) } else { tests.stop() } }.disabled(!tests.simulation && !tests.driving)
-                    Text(tests.driving ? "Trascina il pallino nel semicerchio: la testa del robot gira fino a 90° a destra o sinistra e si alza fino a 85°, sempre dentro la calibrazione del robot, a velocità costante. Lasciandolo, la testa resta lì; «Testa dritta» la rimette al centro." : tests.simulation ? "Trascina il pallino nel semicerchio: la testa simulata gira fino a 90° a destra o sinistra e si alza fino a 85°; in giù il K151 non scende. Lasciandolo resta lì. Sono gli stessi limiti del robot, non una calibrazione." : "Attiva «Simulazione dei movimenti» o «Muovi il robot vero» per usare il joystick.").font(.caption)
+                    Button("Testa dritta") { knob = .zero; tests.move(x: 0, y: 0) }.disabled(!tests.driving)
+                    Text(tests.driving ? "Trascina il pallino nel semicerchio: la testa del robot gira fino a 90° a destra o sinistra e si alza fino a 85°, sempre dentro la calibrazione del robot, a velocità costante. Lasciandolo, la testa resta lì; «Testa dritta» la rimette al centro." : tests.simulation ? "Trascina il pallino nel semicerchio: la testa simulata gira fino a 90° a destra o sinistra e si alza fino a 85°; in giù il K151 non scende. Lasciandolo resta lì. Sono gli stessi limiti del robot, non una calibrazione." : "Il joystick si attiva da solo quando il robot è collegato e ha i movimenti accesi (scheda Robot, «Movimenti della testa»).").font(.caption)
                 }
             }.navigationTitle("Test robot")
         }.onChange(of: tests.simulation) { _, _ in tests.reset(); knob = .zero }
             .onChange(of: tests.driving) { _, driving in if !driving { knob = .zero } }
-            .onAppear { Task { await tests.check(using: store) } }
+            // The real robot by default when its motions are on (owner, 15 Nov 2026: no simulation, no «Muovi il robot vero»).
+            .onAppear { Task { await tests.check(using: store); await tests.startDriving(using: store) { scenePhase == .active } } }
             .onDisappear { tests.stopDriving(); tests.reset(); tests.simulation = false; knob = .zero }
-            .onChange(of: scenePhase) { _, phase in if phase == .active { Task { await tests.check(using: store) } } else { tests.stopDriving(); tests.reset(); tests.simulation = false; knob = .zero } }
+            .onChange(of: scenePhase) { _, phase in if phase == .active { Task { await tests.check(using: store); await tests.startDriving(using: store) { scenePhase == .active } } } else { tests.stopDriving(); tests.reset(); tests.simulation = false; knob = .zero } }
     }
 }
 
@@ -1217,7 +1546,6 @@ struct RobotPairingSection: View {
             if running { ProgressView("Attendo la conferma del robot…") }
             else { Button("Abbina") { pair() }.disabled(code.count != 6 || !store.connected) }
             if !message.isEmpty { Text(message).font(.caption) }
-            Text("Serve solo la prima volta o dopo un reset: il robot senza credenziale mostra il codice sullo schermo (anche dal suo menu, «Abbina con l’app»). Il codice dura 5 minuti.").font(.caption)
         }
     }
     private func pair() {

@@ -24,5 +24,5 @@ it('does not advance the virtual motor pose while tracking is disabled',()=>{
   for(let i=0;i<10;i++){tracker.accept({id:'face',x:1,y:1,confidence:1,sequence:i},100+i*100);tracker.tick(100+i*100);}
   expect(tracker.yaw).toBe(0);expect(tracker.pitch).toBe(0);
   tracker.enabled=true;const pose=tracker.tick(1100).rotation!;
-  expect(FOLLOW_SPEED).toBe(3);expect(Math.abs(pose.y)).toBeLessThanOrEqual(FOLLOW_SPEED*.1+1e-9); // one step of 0.1 s from straight ahead
+  expect(FOLLOW_SPEED).toBe(6);expect(Math.abs(pose.y)).toBeLessThanOrEqual(FOLLOW_SPEED*.1+1e-9); // one step of 0.1 s from straight ahead
 });

@@ -1,7 +1,7 @@
 // Spoken timers, Pomodoro and reply mood: pure logic, no robot needed.
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {Reminders,duration} from './reminders.js';
+import {Reminders,ClockReminders,duration,LATE_MS} from './reminders.js';
 import {voiceWire} from './voice-device.test.mjs';
 // Values from the vm sandbox have another realm's prototypes: compare plain copies.
 const same=(actual,expected,message)=>assert.deepEqual(JSON.parse(JSON.stringify(actual)),expected,message);
@@ -97,6 +97,19 @@ test('spoken face commands: smile, sad and angry face, short and never negated (
   assert.equal(e('Guarda a destra'),null);assert.equal(headCommand('Sorridi'),null);assert.equal(timerCommand('Sorridi'),null);
 });
 
+test('the feeling Robottino says it has in its reply, in Italian and English; «voce» asks for the face too (12 Nov 2026)',async()=>{
+  const {replyFaceCommand,faceCommand}=await voiceWire();
+  const r=text=>replyFaceCommand(text)?.expression??null,e=text=>faceCommand(text)?.expression??null;
+  for(const [text,expression] of [['Grrr, adesso sono proprio arrabbiata!','angry'],['Grrr, adesso sono proprio arrabbiato! Non si dicono certe parole!','angry'],['Grrr, adesso sono proprio arrabbiata!...','angry'],['Uffa, adesso sono davvero arrabbiata!','angry'],['Grrr, now I am really angry!','angry'],['Grr! I\'m so mad right now!','angry'],
+    ['Oh no… che tristezza.','sad'],['Oh no… che tristezza....','sad'],['Oh no… that is so sad.','sad'],['Oh no... how sad.','sad'],['Adesso sono tanto triste.','sad'],['I am so sad now.','sad'],
+    ['Ecco, sono tornata felice! Come posso aiutarti ora?','happy'],['Okay, I\'m happy again!','happy'],['Va bene, sono tornato normale.','normal'],['Ecco, mi sono calmata.','normal'],['Okay, back to normal!','normal'],['Alright, I have calmed down.','normal'],['Non sono più arrabbiata, promesso.','normal']])assert.equal(r(text),expression,text);
+  for(const text of ['No, non sono arrabbiata, sto benissimo!','Non sono triste, tranquillo.','I am not angry at all.','Uff, oggi ci sono dieci gradi.','Ecco.','Fammi vedere…','Mi dispiace, purtroppo non posso.','Oh no, che tristezza, mi dispiace tanto per il tuo gatto. Vuoi raccontarmi come sta adesso?','That is so sad to hear, I am sorry about your cat and I hope it gets better soon.','C’era una volta una principessa che viveva in un castello lontano lontano, e un giorno disse al drago: sono arrabbiata con te!','Sto controllando il meteo per oggi, dammi un attimo.',''])assert.equal(r(text),null,text);
+  // 11 Nov 2026, 18:17: «Fai la voce arrabbiata.» changed the voice and not the face.
+  assert.equal(e('Fai la voce arrabbiata.'),'angry');assert.equal(e('Fai la voce triste'),'sad');assert.equal(e('Angry voice'),'angry');assert.equal(e('Make a sad voice'),'sad');assert.equal(e('Che bella voce che hai oggi, mi piace molto'),null);
+  // «basta» is a way back for the voice (HEAD_RULE): the face must go back with it.
+  assert.equal(e('Basta.'),'normal');assert.equal(e('Ok, basta.'),'normal');assert.equal(e('Adesso basta'),'normal');assert.equal(e('Basta poco per essere felici in questa vita'),null);
+});
+
 test('the same commands in English: head, faces and «what is this?», never from everyday sayings (11 Nov 2026)',async()=>{
   const {headCommand,faceCommand,seeCommand,replyHeadCommand,replySee,timerCommand}=await voiceWire();
   const d=text=>headCommand(text)?.direction??null,e=text=>faceCommand(text)?.expression??null;
@@ -109,6 +122,31 @@ test('the same commands in English: head, faces and «what is this?», never fro
   for(const text of ['What is the capital of France?','What do you think?','What is this song about anyway','This is nice','See you later','What time is it?'])assert.equal(seeCommand(text),false,text);
   same(replyHeadCommand('Okay, I\'ve turned my head to the left.'),{direction:'left'});same(replyHeadCommand('Looking up now.'),{direction:'up'});assert.equal(replyHeadCommand('I can\'t turn my head to the right.'),null);
   assert.equal(replySee('Let me see…'),true);assert.equal(replySee('Let me take a look.'),true);assert.equal(replySee('Let me know.'),false);assert.equal(replySee('Let me check that for you.'),false,'said for anything: no picture');assert.equal(replySee('Let me check the connection for you.'),false);
+  // Owner, 13 Nov 2026: «gli sto chiedendo il meteo per domani e mi dice vedo un ambiente interno». The picture is
+  // taken only when looking is the whole reply; a search announced with the same words takes none.
+  for(const text of ['Fammi vedere…','Fammi vedere.','Fammi vedere meglio…','Ok, fammi vedere…','Fammi guardare.','Fammi dare un\'occhiata…','Guardo subito.','Do un\'occhiata.','Fammi vedere cos\'è.','Fammi vedere che cos’è…','Fammi vedere cosa hai in mano.','Fammi vedere questo oggetto.','Aspetta, fammi vedere un attimo…','Let me see.','Okay, let me take a look…','Let me have a look at it.','Let me see what you\'re holding.','I\'ll take a look.'])assert.equal(replySee(text),true,text);
+  for(const text of ['Fammi vedere... Aspetta un attimo, controllo subito il meteo per Roma.','Controllo subito le previsioni meteo per domani a Roma. Un attimo.','Controllo subito.','Fammi vedere il meteo.','Fammi vedere cosa dice il meteo per domani.','Fammi vedere che tempo fa a Roma.','Fammi vedere… ho girato la testa a destra.','Guardo subito le notizie di oggi.','Do un\'occhiata alle previsioni.','Vedo un ambiente interno, ma non si distingue nessun oggetto in particolare.','Let me see what the weather is like tomorrow.','Let me look that up for you.','Let me see if I can find the forecast.','I\'ll take a look at the news.'])assert.equal(replySee(text),false,text);
   // Italian is untouched, and a timer in either language still comes first where it did.
   assert.equal(d('Destra'),'right');assert.equal(e('Fai la faccia triste'),'sad');assert.equal(seeCommand("Cos'è questo?"),true);assert.equal(d('Tu.'),'up');
+});
+
+test('reminders at a clock time: kept across a restart, said once at their minute, a missed one still said if recent (14 Nov 2026)',()=>{
+  const now=Date.UTC(2026,10,14,17,0),at=Date.UTC(2026,10,15,8,0);
+  const list=new ClockReminders();
+  assert.equal(list.add(at,'pane',0),'clock','no time from the network yet');
+  assert.equal(list.add(now-1000,'ieri',now),'past');
+  assert.equal(list.add(at,'pane',now),'ok');assert.equal(list.add(at+30000,'latte',now),'ok','the same minute replaces it');
+  assert.deepEqual(list.list,[{at:at+30000,text:'latte'}]);
+  for(let i=1;i<8;i++)assert.equal(list.add(at+i*3600000,'cosa '+i,now),'ok');
+  assert.equal(list.add(at+99*3600000,'troppi',now),'full');
+  const again=new ClockReminders(list.save());assert.deepEqual(again.list,list.list,'saved and read back');
+  assert.deepEqual(again.due(at-1000),[]);
+  assert.deepEqual(again.due(at+30000).map(f=>f.text),['Promemoria: latte']);assert.deepEqual(again.due(at+30000),[],'once');
+  assert.equal(again.cancel(at+3600000+5000),1);assert.equal(again.cancel(at+3600000),0);
+  // Off for a while: a reminder missed by less than LATE_MS is said, an older one goes silently.
+  const late=again.due(at+2.5*3600000+LATE_MS);
+  assert.deepEqual(late.map(f=>f.text),['Promemoria: cosa 3','Promemoria: cosa 4','Promemoria: cosa 5','Promemoria: cosa 6','Promemoria: cosa 7'],'«cosa 2», 6.5 h late, is not said');
+  assert.deepEqual(again.list,[]);
+  assert.deepEqual(new ClockReminders('not json').list,[]);assert.deepEqual(new ClockReminders(undefined).list,[]);
+  assert.deepEqual(new ClockReminders(JSON.stringify([{at:'x',text:'a'},{at:5,text:''},{at:at,text:'ok'}])).list,[{at,text:'ok'}]);
 });

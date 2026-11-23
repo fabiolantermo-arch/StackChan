@@ -41,22 +41,32 @@ export async function preferencesAPI(request:Request,env:Env){
   for(;;){const {done,value}=await reader.read();if(done)break;size+=value.length;if(size>1024){await reader.cancel();return Response.json({error:'payload_too_large'},{status:413});}raw+=decoder.decode(value,{stream:true});}
   let body:unknown;try{body=JSON.parse(raw+decoder.decode());}catch{return Response.json({error:'invalid_json'},{status:400});}
   if(!validPreferences(body))return Response.json({error:'invalid_preferences'},{status:400});
-  if(body.provider==='elevenlabs'){
-    try {
-    const response=await fetch('https://api.elevenlabs.io/v1/convai/agents/'+encodeURIComponent(env.ELEVENLABS_AGENT_ID),{method:'PATCH',headers:{'xi-api-key':env.ELEVENLABS_API_KEY??'','content-type':'application/json'},body:JSON.stringify({conversation_config:{tts:{voice_id:body.voice}}}),signal:AbortSignal.timeout(10000)});
-    if(!response.ok)return Response.json({error:'voice_update_failed'},{status:502});
-    const checked=await fetch('https://api.elevenlabs.io/v1/convai/agents/'+encodeURIComponent(env.ELEVENLABS_AGENT_ID),{headers:{'xi-api-key':env.ELEVENLABS_API_KEY??''},signal:AbortSignal.timeout(10000)});
-    const config=await checked.json() as {conversation_config?:{tts?:{voice_id?:string}}};
-    if(!checked.ok||config.conversation_config?.tts?.voice_id!==body.voice)return Response.json({error:'voice_update_unverified'},{status:502});
-    }catch{return Response.json({error:'voice_update_failed'},{status:502});}
-  }
   // The language stays as it was when the request does not name one (an older app saves model and voice only).
   // English with the ElevenLabs agent needs the agent to have it: it is added now if missing, and when that cannot
   // be confirmed nothing is saved, so no conversation is ever started in a language the agent refuses.
+  // It comes before the voice (code review, 19 Nov 2026): a refused language used to leave the agent with the new voice
+  // while the app was told it had failed and kept the old one.
   const language=body.language??(await store.preferences()).language;
   if(language==='en'&&body.provider==='elevenlabs'){
     try{if(!(await installEnglish(env)).ready)return Response.json({error:'language_unavailable'},{status:502});}
     catch{return Response.json({error:'language_unavailable'},{status:502});}
+  }
+  if(body.provider==='elevenlabs'){
+    const agentUrl='https://api.elevenlabs.io/v1/convai/agents/'+encodeURIComponent(env.ELEVENLABS_AGENT_ID),key=env.ELEVENLABS_API_KEY??'';
+    const voiceOf=async()=>{const r=await fetch(agentUrl,{headers:{'xi-api-key':key},signal:AbortSignal.timeout(10000)});if(!r.ok)return undefined;return ((await r.json()) as {conversation_config?:{tts?:{voice_id?:string}}}).conversation_config?.tts?.voice_id;};
+    const setVoice=(voice_id:string)=>fetch(agentUrl,{method:'PATCH',headers:{'xi-api-key':key,'content-type':'application/json'},body:JSON.stringify({conversation_config:{tts:{voice_id}}}),signal:AbortSignal.timeout(10000)});
+    let previous:string|undefined,patched=false;
+    try {
+      previous=await voiceOf();
+      const response=await setVoice(body.voice);
+      if(!response.ok)return Response.json({error:'voice_update_failed'},{status:502});
+      patched=true;
+      if(await voiceOf()!==body.voice)throw Error('unverified');
+    }catch{
+      // Not confirmed after a change: the voice before is put back, so that the agent and the app agree again.
+      if(patched&&previous&&previous!==body.voice)try{await setVoice(previous);}catch{}
+      return Response.json({error:patched?'voice_update_unverified':'voice_update_failed'},{status:502});
+    }
   }
   return Response.json({preferences:await store.setPreferences({provider:body.provider,voice:body.voice,...(language?{language}:{})})},{headers:{'cache-control':'no-store'}});
 }

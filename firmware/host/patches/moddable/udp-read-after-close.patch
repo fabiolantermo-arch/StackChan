@@ -1,0 +1,57 @@
+diff --git a/modules/embedded/io/socket/lwip/udp.c b/modules/embedded/io/socket/lwip/udp.c
+index c27d4c2..12feb5e 100644
+--- a/modules/embedded/io/socket/lwip/udp.c
++++ b/modules/embedded/io/socket/lwip/udp.c
+@@ -371,9 +371,16 @@ void udpDeliver(void *the, void *refcon, uint8_t *message, uint16_t messageLengt
+ 		;
+ 	builtinCriticalSectionEnd();
+ 
++	// Robottino (14 Nov 2026): an error thrown by whoever reads the packets is said on the log and ends there.
++	// Thrown out of here it had nobody to catch it and stopped the whole host (XS abort status=5, restart).
+ 	xsBeginHost(the);
+-		xsmcSetInteger(xsResult, count);
+-		xsCallFunction1(xsReference(udp->onReadable), udp->obj, xsResult);
++		xsTry {
++			xsmcSetInteger(xsResult, count);
++			xsCallFunction1(xsReference(udp->onReadable), udp->obj, xsResult);
++		}
++		xsCatch {
++			modLog("[robottino] udp reader error (ignored)");
++		}
+ 	xsEndHost(the);
+ }
+ 
+diff --git a/modules/embedded/network/dns/resolver/dns.js b/modules/embedded/network/dns/resolver/dns.js
+index 8727a84..0a84373 100644
+--- a/modules/embedded/network/dns/resolver/dns.js
++++ b/modules/embedded/network/dns/resolver/dns.js
+@@ -89,8 +89,15 @@ class Resolver {
+ 			this.#socket ??= new (this.#UDP.io)({
+ 				target: this,
+ 				onReadable: function(count) {
+-					while (count--)
++					// Robottino (14 Nov 2026): an answer may close this socket (#remove, when no request is left).
++					// With two answers waiting (a question asked again on a weak Wi-Fi brings two) the next read
++					// was then made on the closed socket: «xsGetHostData: invalid host data», caught by nobody,
++					// and the host restarted (XS abort status=5 in udpDeliver, 21 s after power-on).
++					while (count--) {
++						if (this.target.#socket !== this)
++							return;
+ 						this.target.#receive(this.read());
++					}
+ 				}
+ 			});
+ 
+diff --git a/modules/embedded/network/ntp/client/ntp.js b/modules/embedded/network/ntp/client/ntp.js
+index 7f6132e..ea2ceaa 100644
+--- a/modules/embedded/network/ntp/client/ntp.js
++++ b/modules/embedded/network/ntp/client/ntp.js
+@@ -101,6 +101,8 @@ class NTP {
+ 		});
+ 	}
+ 	#onReadable(count) {
++		if (!this.#socket)		// Robottino (14 Nov 2026): closed while an answer was on its way (see dns.js)
++			return;
+ 		const packet = new DataView(this.#socket.read());
+ 		while (--count)
+ 			this.#socket?.read();

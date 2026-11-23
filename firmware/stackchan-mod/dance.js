@@ -22,7 +22,7 @@ export class DanceController {
       offset=a[1]+(b[1]-a[1])*t;break;
     }
     const target=clamp(this.base.y+offset,-YAW,YAW);
-    this.position.y+=clamp(target-this.position.y,-3*dt,3*dt); // the one head speed (calibration.js HEAD_SPEED), above the dance's own pace
+    this.position.y+=clamp(target-this.position.y,-6*dt,6*dt); // the one head speed (calibration.js HEAD_SPEED), above the dance's own pace
     if(elapsed>=4200 && Math.abs(this.position.y-this.base.y)<.001)this.active=false;
     // A stalled scheduler may leave a partially completed move: hold rather than loop forever.
     if(elapsed>=6000)this.active=false;

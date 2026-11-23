@@ -39,7 +39,9 @@ Sono tre parti che parlano tra loro solo attraverso il servizio cloud, quindi ne
   | «fai la faccia triste» | diventa triste e resta triste, voce compresa |
   | «fai la faccia arrabbiata» | diventa arrabbiata e resta brontolona (mai offensiva) |
   | «torna felice» | sorride, poi torna come sempre |
-  | «torna normale», «calmati», «non essere più triste» | torna subito come sempre |
+  | «torna normale», «calmati», «basta», «non essere più triste» | torna subito come sempre |
+
+  Se la richiesta è detta in un altro modo e la voce di Robottino diventa comunque arrabbiata o triste, il viso segue quello che dice («Grrr, adesso sono proprio arrabbiata!»).
 
 - **«Cos'è questo?»** Tieni un oggetto davanti al robot e chiedi «cos'è questo?», «cosa vedi?» o «cosa ho in mano?». Scatta una foto 160×120 con la sua fotocamera, la manda sulla connessione della voce, e un modello con la vista la descrive in una frase che il robot dice. Non indovina mai: niente foto, niente risposta.
 - **Collegamento con il telefono.** Dall'iPhone: video dal vivo, controllo manuale della testa, inseguimento del viso (Vision sul telefono, la testa sul robot), chiamate nei due sensi, danze.
@@ -64,6 +66,11 @@ Per compilarla: apri `ios/Robottino.xcodeproj`, imposta il tuo identificativo de
 
 - M5Stack **StackChan K151** (CoreS3, ESP32-S3 rev 0.2, 16 MB di flash, due servi seriali, camera GC0308, sensore di tocco sulla testa Si12T).
 - Un iPhone per l'app (facoltativo per la conversazione, necessario per il collegamento dal vivo e per l'abbinamento).
+- Facoltativi, sulle porte Grove (gestiti dal codice, diversi pezzi non ancora provati sull'hardware vero): il rover M5Stack RoverC Pro e un sensore di distanza VL53L0X sulla porta A con un hub Grove semplice, un'unità ENV III, un sensore di movimento PIR sulla porta B, una camera K210 UnitV sulla porta C. Per ora tutti i sensori stanno sulla testa, quindi il sensore di distanza guarda dove guarda la testa.
+
+![Robottino con tutti i sensori agganciati alla testa](docs/media/robot-sensors.jpg)
+
+*Il K151 con i sensori in più agganciati alla testa; sullo schermo, uno dei volti che si scelgono dall'app.*
 
 Una build per CoreS3 da sola non prova la compatibilità con il K151: limiti dei servi, calibrazione e sensore della testa sono stati tutti regolati sul robot vero.
 

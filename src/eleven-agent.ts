@@ -79,6 +79,59 @@ const agentApi=(env:Env)=>{
     return response.json() as Promise<any>;
   };
 };
+// A livelier voice (owner, 16 Nov 2026: «modifica l'agente 11 Labs di robottino in modo tale che abbia una voce molto
+// più energica, un po' come fatto per LiveWatch»). LiveWatch's agent (another project, only read) has the same voice
+// (Sami), the same model, stability 0.23 and the expressive mode on: a low stability lets the voice move much more.
+// Robottino's agent only. Only the settings named here are written (and the expressive mode only on an agent that
+// has the setting); the voice, the model, the prompt and everything else are read again afterwards and must be as
+// they were. `before` is what to give back to this same call to undo it.
+export const LIVELY_VOICE={stability:.23,expressive:true};
+// temperature (owner, the same evening: «porta temperatura a 1», as LiveWatch's agent has it): not the voice but how
+// freely the model that writes the replies chooses its words; 0 gave the same flat sentences every time.
+export type VoiceWish={stability?:number;speed?:number;expressive?:boolean;temperature?:number};
+const voiceState=(agent:any)=>{
+  const tts=agent?.conversation_config?.tts??{},prompt=agent?.conversation_config?.agent?.prompt??{};
+  return {voice:tts.voice_id??null,model:tts.model_id??null,stability:tts.stability??null,similarity:tts.similarity_boost??null,speed:tts.speed??null,expressive:tts.expressive_mode??null,llm:prompt.llm??null,temperature:prompt.temperature??null};
+};
+export function voiceWish(value:unknown):VoiceWish|null{
+  if(value===undefined||value===null)return LIVELY_VOICE;
+  if(typeof value!=='object'||Array.isArray(value))return null;
+  const v=value as Record<string,unknown>,wish:VoiceWish={};
+  for(const key of Object.keys(v))if(!['stability','speed','expressive','temperature'].includes(key))return null;
+  if('stability'in v){if(typeof v.stability!=='number'||!(v.stability>=0&&v.stability<=1))return null;wish.stability=v.stability;}
+  if('speed'in v){if(typeof v.speed!=='number'||!(v.speed>=.7&&v.speed<=1.2))return null;wish.speed=v.speed;}
+  if('expressive'in v){if(typeof v.expressive!=='boolean')return null;wish.expressive=v.expressive;}
+  if('temperature'in v){if(typeof v.temperature!=='number'||!(v.temperature>=0&&v.temperature<=1))return null;wish.temperature=v.temperature;}
+  return Object.keys(wish).length?wish:null;
+}
+export async function agentVoice(env:Env){return voiceState(await agentApi(env)());}
+export async function setAgentVoice(env:Env,wish:VoiceWish=LIVELY_VOICE){
+  const api=agentApi(env),before=await api(),was={...(before.conversation_config?.tts??{})},change:Record<string,unknown>={};
+  if(wish.stability!==undefined&&was.stability!==wish.stability)change.stability=wish.stability;
+  if(wish.speed!==undefined&&was.speed!==wish.speed)change.speed=wish.speed;
+  if(wish.expressive!==undefined&&'expressive_mode'in was&&was.expressive_mode!==wish.expressive)change.expressive_mode=wish.expressive;
+  const others=(agent:any)=>{const {stability,speed,expressive_mode,...rest}=agent?.conversation_config?.tts??{};return JSON.stringify(rest);};
+  let after=before;
+  if(Object.keys(change).length){
+    await api({method:'PATCH',body:JSON.stringify({conversation_config:{tts:change}})});after=await api();
+    // A provider that replaced the voice settings instead of adding to them: they are written again whole.
+    if(others(after)!==others(before)){await api({method:'PATCH',body:JSON.stringify({conversation_config:{tts:{...was,...change}}})});after=await api();}
+  }
+  // The temperature is among the prompt's settings: only it is written, and the prompt's text, model and tools are
+  // read again (`tools` is the provider's expanded copy of tool_ids: never sent, never compared).
+  const promptOf=(agent:any)=>{const {temperature,tools,...rest}=agent?.conversation_config?.agent?.prompt??{};return JSON.stringify(rest);};
+  const changed=Object.keys(change);
+  if(wish.temperature!==undefined&&before.conversation_config?.agent?.prompt?.temperature!==wish.temperature){
+    changed.push('temperature');
+    await api({method:'PATCH',body:JSON.stringify({conversation_config:{agent:{prompt:{temperature:wish.temperature}}}})});after=await api();
+    if(promptOf(after)!==promptOf(before)){
+      const {tools,...whole}=before.conversation_config?.agent?.prompt??{};
+      await api({method:'PATCH',body:JSON.stringify({conversation_config:{agent:{prompt:{...whole,temperature:wish.temperature}}}})});after=await api();
+    }
+  }
+  return {before:voiceState(before),after:voiceState(after),changed,voiceUnchanged:others(after)===others(before),
+    promptUnchanged:promptOf(after)===promptOf(before)};
+}
 const englishState=(agent:any)=>{
   const presets=agent?.conversation_config?.language_presets??{},primary=agent?.conversation_config?.agent?.language??null;
   const override=agent?.platform_settings?.overrides?.conversation_config_override?.agent?.language===true;

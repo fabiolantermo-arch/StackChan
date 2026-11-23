@@ -7,6 +7,7 @@ enum RobotLiveError: LocalizedError {
         switch self {
         case .offline: return "Collegamento al robot assente."
         case .invalid: return "Dati del robot non validi. Collegamento chiuso."
+        case .rejected("superseded"): return "Comando annullato dallo Stop."
         case .rejected(let reason): return "Il robot non ha eseguito il comando (\(reason))."
         case .timeout: return "Il robot non ha confermato il comando in tempo."
         case .busy: return "Attendi il comando precedente."
@@ -20,6 +21,21 @@ struct RobotLiveStatus: Decodable {
     var calibrated: Bool
     var motion: Bool
     var motionEnabled: Bool
+    var roverFollow: Bool? = nil   // «Inseguimento con rover» on (15 Nov 2026)
+    var gazeCall: Bool? = nil      // «Chiamata con lo sguardo» on (21 Nov 2026)
+    var forceFollow: Bool? = nil   // the Force follows the hand (23 Nov 2026): send where the hand is (RobotForceHand)
+    var exploring: Bool? = nil     // «Esplora» going, or its conversation opening (23 Nov 2026, RobotExploreKey)
+    var rover: Bool? = nil         // the rover answers
+
+    /// The state a switch of the Robot tab reads back (RobotRemoteSwitch statusKey); nil for a key it does not know.
+    func switchState(_ key: String) -> Bool? {
+        switch key {
+        case "motionEnabled": return motionEnabled
+        case "roverFollow": return roverFollow
+        case "gazeCall": return gazeCall
+        default: return nil
+        }
+    }
     var camera: Bool
     var audio: Bool
     var screen: Bool
@@ -35,6 +51,7 @@ struct RobotMediaPacket {
     let payload: Data
     /// A camera frame rebuilt from its pieces keeps the robot's frame number (face following answers with it).
     var frameID: UInt32 = 0
+    static let jpegMin = 100, jpegMax = 24000
     func encoded() throws -> Data {
         guard sequence > 0 else { throw RobotLiveError.invalid }
         if kind == 3 {
@@ -52,6 +69,10 @@ struct RobotMediaPacket {
             let frame = header.prefix(4).reduce(UInt32(0)) { $0 << 8 | UInt32($1) }
             let offset = header.suffix(4).reduce(UInt32(0)) { $0 << 8 | UInt32($1) }
             guard frame > 0, UInt64(offset) + UInt64(payload.count - 8) <= UInt64(width * height) else { throw RobotLiveError.invalid }
+        } else if kind == 8 {
+            // One camera picture as a JPEG, whole (14 Nov 2026): what the robot sends when camera.start asked for it
+            // («jpeg»). Same bounds as src/robot-wire.ts and the MOD's live-wire.js.
+            guard (1...320).contains(width), (1...240).contains(height), (Self.jpegMin...Self.jpegMax).contains(payload.count), payload.prefix(2).elementsEqual([0xFF, 0xD8]) else { throw RobotLiveError.invalid }
         } else if kind == 7 {
             // Only inside the app: a grey frame rebuilt from kind 6 pieces. Never accepted from the network.
             guard (1...160).contains(width), (1...120).contains(height), payload.count == width * height else { throw RobotLiveError.invalid }
@@ -130,6 +151,418 @@ enum RobotHeadJoystick {
     /// e sinistra»): the cause was the K151 yaw servo, now reversed in the MOD (calibration.js YAW_SERVO), so the
     /// angles go as they are and every motion, face following included, turns the right way.
     static func command(yaw: Int, pitch: Int) -> [String: Int] { ["yaw": yaw, "pitch": pitch] }
+}
+
+/// The rover under the robot (owner, 14 Nov 2026: «Fai 1 2 5 6 7»): keys in the Live page. The directions are the
+/// robot's own, as in the video from its camera (the robot faces the user, so its left is the user's right). While a
+/// key is held the app sends a short move every `repeatMs`, each lasting `moveMs`: the robot stops the wheels by
+/// itself `moveMs` after the last one, so a lifted finger, a closed app or a lost link all end in a stop. Lifting the
+/// finger also sends a stop. Same moves and bounds as the relay (src/robot-wire.ts ROVER_MOVES, ROVER_MS) and the MOD.
+/// The gripper (owner, 15 Nov 2026): gripOpen, gripHalf («chiudi poco») and gripClose («chiudi tutto») are sent once, on a tap; the time goes with them only
+/// because the relay asks for one.
+enum RobotRoverKeys {
+    static let moveMs = 500, repeatMs = 300, stopMs = 200
+    enum Move: String, CaseIterable { case forward, back, left, right, turnLeft, turnRight, stop, gripOpen, gripHalf, gripClose }
+    /// Done at once by the robot, nothing to repeat while a key is held.
+    static func once(_ move: Move) -> Bool { move == .stop || move == .gripOpen || move == .gripHalf || move == .gripClose }
+    static func command(_ move: Move) -> [String: Any] { ["move": move.rawValue, "ms": once(move) ? stopMs : moveMs] }
+    /// «Avanti» refused at the very start of a press is tried again a few times (review, 23 Nov 2026): the robot wants
+    /// the head, where the distance sensor is, still and a fresh reading taken since; the first key stops the head's
+    /// own moves, and about a second later the reading is there. Any other refusal, or one after a move went, blocks
+    /// until the finger is lifted, as before.
+    static let firstTries = 3
+    static func retries(_ move: Move, refused: Int, moved: Bool) -> Bool { move == .forward && !moved && refused < firstTries }
+    static func label(_ move: Move) -> String {
+        switch move {
+        case .forward: "Avanti"; case .back: "Indietro"; case .left: "Sinistra"; case .right: "Destra"
+        case .turnLeft: "Gira a sinistra"; case .turnRight: "Gira a destra"; case .stop: "Ferma"
+        case .gripOpen: "Apri pinza"; case .gripHalf: "Chiudi poco"; case .gripClose: "Chiudi tutto"
+        }
+    }
+    static func symbol(_ move: Move) -> String {
+        switch move {
+        case .forward: "arrow.up"; case .back: "arrow.down"; case .left: "arrow.left"; case .right: "arrow.right"
+        case .turnLeft: "arrow.counterclockwise"; case .turnRight: "arrow.clockwise"; case .stop: "stop.fill"
+        case .gripOpen: "arrow.left.and.right"; case .gripHalf: "arrow.down.right.and.arrow.up.left"; case .gripClose: "arrow.right.and.line.vertical.and.arrow.left"
+        }
+    }
+}
+
+/// The robot's speaker volume from the Robot tab (owner, 15 Nov 2026: «distorce ancora, possiamo mettere una
+/// regolazione volume sull app nella schermata robot?»). A whole level 1…10, as the relay (src/robot-wire.ts
+/// VOLUME_LEVELS) and the MOD (live-wire.js VOLUME: 10 is the amplifier's 252, 6 less each level) accept it.
+/// 9 is the MOD's own default.
+enum RobotVolume {
+    static let levels = 1...10, standard = 9
+    static func command(_ level: Int) -> [String: Any]? { levels.contains(level) ? ["level": level] : nil }
+}
+
+/// Hand gestures in the robot camera's video (owner, 15 Nov 2026: «riconosci i gesti»; in the app, with Apple's hand
+/// pose: thumb up and down, open hand = stop, a wave, two fingers). PREPARED, NEVER TRIED WITH THE ROBOT'S REAL VIDEO.
+/// Here only the rules, on the points Vision gives (0…1 of the picture, x to the right, y UP): which fingers are
+/// stretched, and what that shape is. Same names as the relay (src/robot-wire.ts HAND_GESTURES) and the MOD
+/// (live-wire.js HAND_GESTURES).
+enum RobotHandGesture {
+    enum Kind: String, CaseIterable { case thumbsUp, thumbsDown, palm, wave, victory }
+    /// What one picture shows. The wave is not a shape: it is an open hand that moves (RobotGestureWatch).
+    enum Shape: Equatable { case thumbsUp, thumbsDown, palm, victory }
+    struct Point: Equatable { var x: Double; var y: Double }
+    struct Hand {
+        var wrist: Point
+        var thumbMP: Point, thumbIP: Point, thumbTip: Point
+        var indexMCP: Point, indexPIP: Point, indexTip: Point
+        var middleMCP: Point, middlePIP: Point, middleTip: Point
+        var ringPIP: Point, ringTip: Point
+        var littlePIP: Point, littleTip: Point
+    }
+    /// A finger is stretched when its tip is clearly farther from the wrist than its middle joint (a bent finger's
+    /// tip comes back toward the palm).
+    static let stretch = 1.2
+    /// The thumb is out when its tip is at least this much of the palm's length away from the index finger's root.
+    static let thumbOut = 0.5
+    /// `aspect`: the picture's width over its height (the robot's video is 4:3), so that distances are true.
+    /// The thumb points up or down when it goes at least this much up or down for each step sideways (first try on the
+    /// robot, 15 Nov 2026, owner: «non riconosce il pollice all'ingiù»: a thumb down is rarely straight down, the
+    /// forearm comes in from the side; it had to be more vertical than sideways, now it may lean up to about 60°).
+    static let thumbLean = 0.6
+    /// What the rules read in a hand: the four fingers stretched or not, the thumb out or not and where it points
+    /// (1 up, −1 down, 0 sideways). nil when the hand is too small to tell.
+    struct Reading: Equatable { var index: Bool, middle: Bool, ring: Bool, little: Bool, thumbOut: Bool, thumbWay: Int }
+    static func reading(_ hand: Hand, aspect: Double = 4.0 / 3.0) -> Reading? {
+        func far(_ a: Point, _ b: Point) -> Double { let dx = (a.x - b.x) * aspect, dy = a.y - b.y; return (dx * dx + dy * dy).squareRoot() }
+        let palm = far(hand.wrist, hand.middleMCP)
+        guard palm.isFinite, palm > 0.02 else { return nil } // too small to tell
+        func out(_ tip: Point, _ joint: Point) -> Bool { far(tip, hand.wrist) > far(joint, hand.wrist) * stretch }
+        let dx = (hand.thumbTip.x - hand.thumbMP.x) * aspect, dy = hand.thumbTip.y - hand.thumbMP.y
+        return Reading(index: out(hand.indexTip, hand.indexPIP), middle: out(hand.middleTip, hand.middlePIP), ring: out(hand.ringTip, hand.ringPIP), little: out(hand.littleTip, hand.littlePIP),
+                       thumbOut: far(hand.thumbTip, hand.indexMCP) >= palm * thumbOut, thumbWay: abs(dy) >= abs(dx) * thumbLean ? (dy > 0 ? 1 : -1) : 0)
+    }
+    static func shape(_ hand: Hand, aspect: Double = 4.0 / 3.0) -> Shape? {
+        guard let r = reading(hand, aspect: aspect) else { return nil }
+        if r.index, r.middle, r.ring, r.little { return .palm }
+        if r.index, r.middle, !r.ring, !r.little { return .victory }
+        // A fist with the thumb out: up or down by where the thumb points.
+        guard !r.index, !r.middle, !r.ring, !r.little, r.thumbOut, r.thumbWay != 0 else { return nil }
+        return r.thumbWay > 0 ? .thumbsUp : .thumbsDown
+    }
+    /// What a picture looked at upside down shows the right way up: only a thumb up counts, as a thumb down (open hand,
+    /// two fingers and a thumb down upside down are not gestures anyone shows) (RobotHandDetector, 23 Nov 2026).
+    static func upsideDown(_ shape: Shape?) -> Shape? { shape == .thumbsUp ? .thumbsDown : nil }
+    /// A picture read upright and upside down (RobotHandDetector): a thumb up upside down is a thumb down when nothing
+    /// was read upright, or when Vision is surer of the hand upside down than of the thumb up it read upright (it fits an
+    /// upright hand onto a hand upside down). Otherwise what was read upright.
+    static func thumbWay(upright: Shape?, uprightSure: Double, turned: Shape?, turnedSure: Double) -> Shape? {
+        guard upsideDown(turned) == .thumbsDown else { return upright }
+        if upright == nil { return .thumbsDown }
+        return upright == .thumbsUp && turnedSure > uprightSure ? .thumbsDown : upright
+    }
+    /// What the app writes while it sees a hand that is no gesture yet, so that a gesture that is not recognised can be
+    /// understood from the screen: which fingers it sees stretched and what the thumb does.
+    static func describe(_ r: Reading) -> String {
+        let fingers = [(r.index, "indice"), (r.middle, "medio"), (r.ring, "anulare"), (r.little, "mignolo")].filter(\.0).map(\.1)
+        let thumb = !r.thumbOut ? "pollice chiuso" : r.thumbWay > 0 ? "pollice in su" : r.thumbWay < 0 ? "pollice in giù" : "pollice di lato"
+        return "Vedo: " + (fingers.isEmpty ? "nessun dito disteso" : fingers.joined(separator: ", ")) + ", " + thumb + "."
+    }
+}
+
+/// From the shapes of the pictures, one after the other, to a gesture, said once. A shape must be there in `need`
+/// pictures in a row within `window`; an open hand is «stop» when it stays still for `still` seconds and «wave» when
+/// it goes from side to side (two turns of at least `swing` of the picture's width). After a gesture nothing more for
+/// `rest` seconds: the robot is doing it.
+/// First try on the robot (15 Nov 2026, owner: «il saluto non funziona»; the app said «mano aperta: fermo»): the
+/// place of the hand was its knuckles, which hardly move in a wave from the wrist, so a wave looked still. Now `x` is
+/// the tip of the middle finger (RobotHandDetector); «stop» waits 0.9 s, not 0.5; a picture where the moving hand is
+/// blurred and not found does not end the open hand's run; and after a «stop» the wait is short, so a wave that began
+/// as a still hand is still seen.
+struct RobotGestureWatch {
+    static let need = 3, window = 1.0, still = 0.9, stillRange = 0.06, swing = 0.06, waveWindow = 3.0, rest = 3.0, palmRest = 1.5
+    /// Third try (23 Nov 2026, owner: «non riconosce il saluto»; thumbs and two fingers were taken that minute): while the
+    /// head follows a face the robot takes its pictures only with the head still, so few reach the app and a quick wave
+    /// shows one turn, not two, and gaps longer than `window`. A wave is now one turn back, and the hand's path is
+    /// kept across gaps of up to `trackGap`.
+    static let waveTurns = 1, trackGap = 1.5
+    private var samples: [(at: Double, shape: RobotHandGesture.Shape, x: Double)] = []
+    /// Where the hand was in the last pictures, whatever its shape (second try, owner: «non riconosce bene il
+    /// saluto»: a waving hand is blurred, and in many pictures its fingers are not read as an open hand; its place
+    /// usually still is). A wave is this path going from side to side, with an open hand seen in `need` of its pictures.
+    /// `thumb`: that picture showed a thumb up or down. Fourth try (23 Nov 2026, owner: «non riconosce più i gesti…
+    /// continuo a vedere la mano aperta, ma non pollice su, pollice giù»): with one turn enough for a wave, a hand raised
+    /// open and then closed to a thumb moved sideways a little and was taken for a wave (5 waves in a minute, no thumb),
+    /// and the 3 s rest after it swallowed the thumb. A thumb seen in the wave's pictures now means no wave.
+    private var track: [(at: Double, x: Double, palm: Bool, thumb: Bool)] = []
+    private var quietUntil = -Double.infinity
+    /// `shape`: what this picture shows (nil: no gesture); `x`: where the hand is across the picture, 0…1 (nil: no hand found).
+    mutating func feed(_ shape: RobotHandGesture.Shape?, x: Double?, at now: Double) -> RobotHandGesture.Kind? {
+        guard now >= quietUntil else { samples.removeAll(); track.removeAll(); return nil }
+        if let last = track.last, now - last.at > Self.trackGap { track.removeAll() }
+        let place = x.flatMap { $0.isFinite ? $0 : nil }
+        if let place { track.append((now, place, shape == .palm, shape == .thumbsUp || shape == .thumbsDown)) }
+        track.removeAll { now - $0.at > Self.waveWindow }
+        if track.filter(\.palm).count >= Self.need, !track.contains(where: \.thumb), Self.turns(track.map(\.x)) >= Self.waveTurns { return said(.wave, at: now) }
+        guard let shape, let place else {
+            // No gesture in this picture: the count starts again, except for an open hand (it may only be blurred;
+            // its run ends by itself after `window` without one).
+            if samples.last?.shape != .palm { samples.removeAll() }
+            return nil
+        }
+        if let last = samples.last, last.shape != shape || now - last.at > Self.window { samples.removeAll() }
+        samples.append((now, shape, place)); samples.removeAll { now - $0.at > Self.waveWindow }
+        guard samples.count >= Self.need, let first = samples.first else { return nil }
+        switch shape {
+        case .thumbsUp: return said(.thumbsUp, at: now)
+        case .thumbsDown: return said(.thumbsDown, at: now)
+        case .victory: return said(.victory, at: now)
+        case .palm:
+            let recent = samples.filter { now - $0.at <= Self.still }.map(\.x)
+            guard now - first.at >= Self.still, recent.count >= Self.need, (recent.max() ?? 0) - (recent.min() ?? 0) <= Self.stillRange else { return nil }
+            return said(.palm, at: now)
+        }
+    }
+    private mutating func said(_ kind: RobotHandGesture.Kind, at now: Double) -> RobotHandGesture.Kind {
+        samples.removeAll(); track.removeAll(); quietUntil = now + (kind == .palm ? Self.palmRest : Self.rest)
+        return kind
+    }
+    /// How many times the hand turned back, counting only swings of at least `swing`.
+    static func turns(_ xs: [Double]) -> Int {
+        guard var edge = xs.first else { return 0 }
+        var way = 0.0, count = 0
+        for x in xs.dropFirst() {
+            if way == 0 { if abs(x - edge) >= swing { way = x > edge ? 1 : -1; edge = x } }
+            else if (x - edge) * way > 0 { edge = x }
+            else if abs(x - edge) >= swing { way = -way; edge = x; count += 1 }
+        }
+        return count
+    }
+    static func label(_ kind: RobotHandGesture.Kind) -> String {
+        switch kind {
+        case .thumbsUp: "pollice su"; case .thumbsDown: "pollice giù"; case .palm: "mano aperta: fermo"
+        case .wave: "saluto"; case .victory: "due dita: ballo"
+        }
+    }
+}
+
+/// What else the app reads in the robot's video (owner, 15 Nov 2026: «implementa: riconoscere chi sei, capire
+/// l'espressione, riconoscere oggetti al volo»), all on the iPhone with Apple's Vision. PREPARED, NEVER TRIED WITH
+/// THE ROBOT'S REAL VIDEO; every threshold here is a first guess, shown on the screen so that it can be set.
+///  - A smile, from the mouth's outline: wider and with its corners higher than a mouth at rest.
+///  - Who it is: Apple gives no face recognition, so this is only «the picture of this face looks like the ones saved
+///    with "Questo sono io"» (an image likeness, VNGenerateImageFeaturePrintRequest): good for telling the owner from
+///    a stranger in the same room and light, not a proof of who someone is. Nothing leaves the iPhone but the name.
+///  - A thing shown to the camera, from Apple's own classifier (VNClassifyImageRequest): only the things in `objects`,
+///    said in Italian. Things that always stand on a desk (screen, keyboard, lamp, plant) are left out on purpose.
+/// Same kinds as the relay (src/robot-wire.ts SIGHT_KINDS) and the MOD (live-wire.js SIGHT_KINDS).
+enum RobotSight {
+    enum Kind: String, CaseIterable { case person, stranger, smile, serious, object }
+    /// The mouth's outline in the face's own box (0…1, y UP): its two corners, its highest and its lowest point.
+    struct Mouth { var left: RobotHandGesture.Point, right: RobotHandGesture.Point, top: Double, bottom: Double }
+    /// A smile is `smileOn` and more; once smiling, it ends under `smileOff`. First try on the robot (15 Nov 2026,
+    /// owner: «ogni tanto ride anche se io non sorrido»): 0.50 and 0.44 were too easy; now higher, held for more
+    /// pictures (RobotSightWatch.need) and answered less often. Still guesses: the numbers in «Vedo: …» will tell.
+    static let smileOn = 0.56, smileOff = 0.48
+    /// How wide the mouth is in the face, plus how much its corners stand above its middle (in mouth widths).
+    static func smileScore(_ m: Mouth) -> Double? {
+        let width = m.right.x - m.left.x
+        guard width.isFinite, width > 0.05, m.top >= m.bottom else { return nil }
+        let lift = ((m.left.y + m.right.y) / 2 - (m.top + m.bottom) / 2) / width
+        return width + lift
+    }
+    /// The saved pictures of the owner's face are at `distances` from this one: the owner when `need` of them are
+    /// nearer than `threshold`.
+    static let likeness = 0.55, likenessNeed = 2, enrolPictures = 5
+    static func isOwner(distances: [Double], threshold: Double = likeness, need: Int = likenessNeed) -> Bool {
+        distances.filter { $0.isFinite && $0 <= threshold }.count >= min(need, max(1, distances.count))  && !distances.isEmpty
+    }
+    /// The name as it goes to the robot: letters, spaces and apostrophes, 20 at most (the relay and the MOD take 24).
+    static func name(_ raw: String) -> String? {
+        let cleaned = String(raw.trimmingCharacters(in: .whitespacesAndNewlines).filter { $0.isLetter || $0 == " " || $0 == "'" }.prefix(20)).trimmingCharacters(in: .whitespaces)
+        return cleaned.isEmpty ? nil : cleaned
+    }
+    /// Apple's label → how Robottino says it («Vedo una tazza.»).
+    static let objects: [String: String] = [
+        "apple": "una mela", "banana": "una banana", "oranges": "un'arancia", "lemon": "un limone", "pineapple": "un ananas", "carrot": "una carota",
+        "bread": "il pane", "egg": "un uovo", "cheese": "il formaggio", "chocolate": "il cioccolato", "candy": "una caramella", "cake": "una torta", "pizza": "una pizza",
+        "coffee": "un caffè", "cup": "una tazza", "mug": "una tazza", "drinking_glass": "un bicchiere", "bottle": "una bottiglia", "wine_bottle": "una bottiglia di vino",
+        "bowl": "una ciotola", "plate": "un piatto", "fork": "una forchetta", "knife": "un coltello", "spoon": "un cucchiaio", "teapot": "una teiera",
+        "book": "un libro", "magazine": "una rivista", "newspaper": "un giornale", "pen": "una penna", "scissors": "le forbici",
+        "phone": "un telefono", "headphones": "le cuffie", "camera": "una macchina fotografica", "gamepad": "un gamepad", "microphone": "un microfono",
+        "eyeglasses": "gli occhiali", "sunglasses": "gli occhiali da sole", "watch": "un orologio", "wallet": "un portafoglio", "coin": "una moneta", "money": "dei soldi",
+        "credit_card": "una carta", "play_card": "una carta da gioco", "backpack": "uno zaino", "bag": "una borsa", "umbrella": "un ombrello", "hat": "un cappello",
+        "shoes": "una scarpa", "scarf": "una sciarpa", "ball": "una palla", "toy": "un giocattolo", "balloon": "un palloncino", "flower": "un fiore",
+        "hammer": "un martello", "screwdriver": "un cacciavite", "guitar": "una chitarra", "cat": "un gatto", "dog": "un cane", "cardboard_box": "una scatola", "hourglass": "una clessidra"
+    ]
+    /// The surest of Apple's labels that Robottino knows, when it is at least `minimum` sure.
+    static let objectSure = 0.5
+    static func object(_ results: [(label: String, confidence: Double)], minimum: Double = objectSure) -> String? {
+        results.filter { $0.confidence >= minimum && objects[$0.label] != nil }.max { $0.confidence < $1.confidence }.flatMap { objects[$0.label] }
+    }
+}
+
+/// From what each picture shows to something worth telling the robot, said once and not again for a while.
+struct RobotSightWatch {
+    static let need = 5, window = 2.0, smileRest = 20.0, seriousAfter = 20.0, seriousRest = 60.0
+    static let personNeed = 2, strangerNeed = 5, strangerOver = 4.0, personRest = 60.0, awayResets = 30.0
+    static let objectNeed = 2, objectWindow = 3.0, objectRest = 120.0
+    private var smiling = false, smiles: [Double] = [], smileQuiet = -Double.infinity, seriousFrom: Double?, seriousQuiet = -Double.infinity
+    private var matches: [(at: Double, owner: Bool)] = [], personQuiet = -Double.infinity, faceAt: Double?
+    private var lastObject: (label: String, at: Double, count: Int)?, objectSaid: [String: Double] = [:]
+    /// `score`: the smile of the face in this picture (nil: no face). A smile held for `need` pictures; or a face that
+    /// has not smiled once in `seriousAfter` seconds.
+    mutating func face(score: Double?, at now: Double) -> RobotSight.Kind? {
+        guard let score else { smiles.removeAll(); smiling = false; seriousFrom = nil; return nil }
+        if smiling ? score < RobotSight.smileOff : score < RobotSight.smileOn { smiling = false; smiles.removeAll() } else { smiling = true; smiles.append(now); smiles.removeAll { now - $0 > Self.window } }
+        if smiling {
+            seriousFrom = nil
+            guard smiles.count >= Self.need, now >= smileQuiet else { return nil }
+            smileQuiet = now + Self.smileRest; smiles.removeAll(); return .smile
+        }
+        if seriousFrom == nil { seriousFrom = now }
+        guard let from = seriousFrom, now - from >= Self.seriousAfter, now >= seriousQuiet else { return nil }
+        seriousQuiet = now + Self.seriousRest; seriousFrom = now; return .serious
+    }
+    /// `owner`: this picture's face looks like the saved ones (nil: no face, or nothing saved). The owner after
+    /// `personNeed` pictures in a row; a stranger after `strangerNeed` in a row over `strangerOver` seconds. Greeted
+    /// once; again only after the face has been away for `awayResets` seconds, and never more often than `personRest`.
+    mutating func person(owner: Bool?, at now: Double) -> RobotSight.Kind? {
+        guard let owner else { if let seen = faceAt, now - seen > Self.awayResets { matches.removeAll(); faceAt = nil; greeted = false }; return nil }
+        faceAt = now
+        if let last = matches.last, last.owner != owner { matches.removeAll() }
+        matches.append((now, owner))
+        guard !greeted, now >= personQuiet, let first = matches.first else { return nil }
+        if owner, matches.count >= Self.personNeed { greeted = true; personQuiet = now + Self.personRest; return .person }
+        if !owner, matches.count >= Self.strangerNeed, now - first.at >= Self.strangerOver { greeted = true; personQuiet = now + Self.personRest; return .stranger }
+        return nil
+    }
+    private var greeted = false
+    /// `label`: the thing this picture shows, in Robottino's words (nil: nothing it knows). The same thing in
+    /// `objectNeed` pictures running; said once, and not again for `objectRest` seconds.
+    mutating func object(label: String?, at now: Double) -> String? {
+        guard let label else { lastObject = nil; return nil }
+        if let last = lastObject, last.label == label, now - last.at <= Self.objectWindow { lastObject = (label, now, last.count + 1) } else { lastObject = (label, now, 1) }
+        guard let seen = lastObject, seen.count >= Self.objectNeed, now >= (objectSaid[label] ?? -Double.infinity) else { return nil }
+        objectSaid[label] = now + Self.objectRest; lastObject = nil; return label
+    }
+}
+
+/// The iPhone helps the robot follow a face (owner, 15 Nov 2026: «possiamo migliorare l'inseguimento con iPhone?»).
+/// The robot follows by itself with its own small detector, which often loses a face seen from below, with glasses or
+/// against the light. The app, which gets the frames of that following as video, finds the face with Apple's detector
+/// and answers where it is in that frame (the `track` command, as «Segui il mio viso»); the robot takes the answer
+/// only while its own detector is blind (MOD live-device.js SELF_HELP_AFTER_MS). PREPARED, NEVER TRIED ON THE ROBOT.
+/// The Force following the hand (owner, 23 Nov 2026: «implementa movimenti con la forza avanti e indietro, destra e
+/// sinistra»): while the robot says it follows the hand (status forceFollow), the app tells it where it sees the hand
+/// across the robot camera's picture (command hand, x 0…1 from the left, as in the picture: the robot's own left is
+/// x < 0.5); at most one every `every` seconds and only with nothing else waiting, so the link stays free.
+enum RobotForceHand {
+    static let every = 0.15
+    static func shouldSend(following: Bool, ready: Bool, pending: Int, x: Double?, since: Double) -> Bool {
+        guard following, ready, pending == 0, let x, x.isFinite, (0...1).contains(x) else { return false }
+        return since >= every
+    }
+}
+
+/// «Esplora» of the Studio (owner, 23 Nov 2026: «nella scheda studio dell'app, sopra la sezione rover, metti un tastino
+/// esplora»; then «permetti la prova dell'esplorazione anche senza il rover. Muovo io il robot, inquadro degli oggetti»).
+/// One key: it starts or stops, as the robot says it is going (status exploring). The robot opens a conversation if
+/// none is going, and says what it sees; without the rover it stands still and is carried by hand.
+enum RobotExploreKey {
+    static func allowsGestures(enabled: Bool, exploring: Bool) -> Bool { enabled && !exploring }
+    static func title(exploring: Bool) -> String { exploring ? "Ferma esplorazione" : "Esplora" }
+    static func command(exploring: Bool) -> [String: Any] { ["on": !exploring] }
+    static func note(exploring: Bool, rover: Bool) -> String {
+        if exploring { return rover ? "Robottino gira per la stanza e dice che cosa vede." : "Portalo in giro e inquadra le cose: dice che cosa vede." }
+        return rover ? "Gira con il rover per tre minuti e dice che cosa vede." : "Senza rover: lo porti tu in mano e lui dice che cosa vede."
+    }
+    /// What a refusal means, in plain words.
+    static func refused(_ error: Error) -> String { "Il robot non ha potuto: \((error as? LocalizedError)?.errorDescription ?? "riprova tra un attimo.")" }
+}
+
+enum RobotFollowHelp {
+    /// `every` was 0.2 and one answer at a time until the owner asked for speed (15 Nov 2026, evening: on the robot's
+    /// log three answers a second, each about a third of a second after its frame): now two may be on their way.
+    static let key = "robot.follow.help", every = 0.08, inFlight = 2
+    /// The middle of the face as the robot wants it: 0…1, x from the left, y from the TOP. The box is Vision's (y up).
+    static func target(minX: Double, minY: Double, width: Double, height: Double) -> (x: Double, y: Double)? {
+        guard [minX, minY, width, height].allSatisfy(\.isFinite), width > 0.02, height > 0.02 else { return nil }
+        return (min(1, max(0, minX + width / 2)), min(1, max(0, 1 - (minY + height / 2))))
+    }
+    /// Two answers on their way at most, only about a frame that has a number (the JPEG video), and only
+    /// when the robot can move its head (otherwise it has nothing to do with it).
+    static func shouldSend(enabled: Bool, ready: Bool, motion: Bool, pending: Int, frame: UInt32, since: Double) -> Bool {
+        enabled && ready && motion && pending < inFlight && frame > 0 && since >= every
+    }
+}
+
+/// The link the app opens by itself (owner, 15 Nov 2026: «appena apro l'app si connette al robot automaticamente»):
+/// one shared link for the whole app, opened whenever the app is in front and no other page has its own (the relay
+/// takes one app link at a time: Test, Aspetto and the quick commands of the Robot tab open theirs, and this one
+/// steps aside for them). When it cannot connect it tries again, each time a little later.
+enum RobotAutoLink {
+    static let enabledKey = "robot.link.auto"
+    /// Seconds before the next try after `failures` tries in a row: 3, 6, 12, 24, then every 30.
+    static func delay(failures: Int) -> Double { min(30, 3 * pow(2, Double(max(0, min(failures, 6))))) }
+    static func shouldConnect(enabled: Bool, active: Bool, hasToken: Bool, open: Bool, otherPages: Int, busy: Bool) -> Bool {
+        enabled && active && hasToken && !open && otherPages == 0 && !busy
+    }
+    /// The relay gives the robot to the newest app link (23 Nov 2026) and tells the old one `app_replaced`: the shared
+    /// link then waits until the app comes back to the front, so two links never take the robot from each other.
+    static func takesBack(after reason: String?) -> Bool { reason != "app_replaced" }
+    /// Hand gestures by themselves on that link (owner, the same day: «abilitiamo anche in automatico il riconoscimento
+    /// dei gesti quando è collegato»): while the robot is connected and has its camera, and the Live page, which has
+    /// its own video and gestures, is not open.
+    static let gesturesKey = "robot.gestures.auto", sightKey = "robot.sight.auto", ownerNameKey = "robot.sight.name", ownerPrintsKey = "robot.sight.prints"
+    static func wantsGestures(link: Bool, gestures: Bool, liveOpen: Bool, ready: Bool, camera: Bool) -> Bool { link && gestures && !liveOpen && ready && camera }
+}
+
+/// What the Robot tab writes after a switch («Movimenti della testa», «Inseguimento con rover») that the robot took
+/// (code review, 15 Nov 2026). `state` is what the robot's own status says after the wait, nil when it said nothing.
+/// The robot's refusal has its own text in the view; here the command was acknowledged, so a state that has not
+/// changed yet is «still on its way», not «refused» (the motors can take longer than the wait to answer).
+enum RobotRemoteSwitchNote {
+    /// Tenths of a second the app waits for the robot's status to change after the acknowledgement.
+    static let waitSteps = 80
+    static let pendingOn = "Il robot ha ricevuto il comando, ma non risulta ancora acceso: può volerci qualche secondo. Riapri questa scheda per rileggere lo stato."
+    static let pendingOff = "Il robot ha ricevuto il comando, ma risulta ancora acceso: riprova."
+    static func text(wanted: Bool, state: Bool?, confirmedOn: String, confirmedOff: String) -> String {
+        if state == wanted { return wanted ? confirmedOn : confirmedOff }
+        return wanted ? pendingOn : pendingOff
+    }
+}
+
+/// Temperature, humidity and pressure from the robot's ENV III (owner, 15 Nov 2026: «quando robot collegato segna
+/// temperatura e umidità di fianco al titolo Robottino in scheda robot»), in the robot's status (src/robot-wire.ts
+/// climate). The title shows them only while the robot is connected and has read them.
+struct RobotClimate: Decodable, Equatable {
+    var t: Double
+    var h: Double
+    var p: Double? = nil
+    static func title(_ climate: RobotClimate?) -> String {
+        guard let c = climate, c.t.isFinite, c.h.isFinite else { return "Robottino" }
+        return "Robottino \(Int(c.t.rounded()))° \(Int(c.h.rounded()))%"
+    }
+}
+
+/// The round stick for the rover (owner, 15 Nov 2026: «un cerchietto che premendolo si muove nelle varie direzioni»).
+/// The finger's offset from the centre (screen points, y grows downwards) picks one of the robot's moves: near the
+/// centre (`deadZone` of the travel) nothing moves, otherwise the stronger axis wins: up forward, down back, left and
+/// right turn on the spot, the safe moves on a desk. Sideways moves stay as two keys. The robot only knows these
+/// fixed moves at one speed (MOD ROVER_SPEED): the stick picks a direction, not a speed.
+enum RobotRoverStick {
+    static let deadZone = 0.35
+    static func move(dx: Double, dy: Double, travel: Double) -> RobotRoverKeys.Move? {
+        guard travel > 0, dx.isFinite, dy.isFinite, (dx * dx + dy * dy).squareRoot() >= deadZone * travel else { return nil }
+        if abs(dy) >= abs(dx) { return dy < 0 ? .forward : .back }
+        return dx < 0 ? .turnLeft : .turnRight
+    }
+}
+
+/// Studio and Live share one connection (owner, 15 Nov 2026: «Collega al robot» at the top of Studio, the rover keys
+/// after its menu). Leaving the Live page keeps the link only when nothing there is running or starting: camera,
+/// video, call, an image on the robot's screen, following or imitation end with the link closed, as before, so
+/// nothing keeps filming or listening once the page is gone.
+enum RobotLiveLeave {
+    static func keepsLink(camera: Bool, screen: Bool, following: Bool, phoneFollowing: Bool, mirroring: Bool, calling: Bool, busy: Bool) -> Bool {
+        !(camera || screen || following || phoneFollowing || mirroring || calling || busy)
+    }
 }
 
 /// «Seguimi con la fotocamera dell’iPhone» (owner, 10 Nov 2026): the iPhone stands next to the robot, facing the
@@ -381,19 +814,19 @@ struct RobotFacePose {
 
 /// Face styles shared by the app, the relay and the robot MOD (same ids everywhere).
 enum RobotFaceStyle: String, CaseIterable, Identifiable {
-    case portrait, white, redhead
+    case portrait, white, redhead, curly
     var id: String { rawValue }
     var title: String {
-        switch self { case .portrait: return "Ritratto"; case .white: return "Robot bianco"; case .redhead: return "Lentiggini" }
+        switch self { case .portrait: return "Ritratto"; case .white: return "Robot bianco"; case .redhead: return "Lentiggini"; case .curly: return "Riccia" }
     }
     /// Asset name of one expression: neutral, happy, sad, blink, talk-small, talk-open.
     func image(_ frame: String) -> String {
-        switch self { case .portrait: return "Face-\(frame)"; case .white: return "Face-White-\(frame)"; case .redhead: return "Face-Red-\(frame)" }
+        switch self { case .portrait: return "Face-\(frame)"; case .white: return "Face-White-\(frame)"; case .redhead: return "Face-Red-\(frame)"; case .curly: return "Face-Curly-\(frame)" }
     }
     /// Band of the 320×240 picture holding eyes and brows: blinking replaces only this band, so a
     /// blink never closes the mouth while speaking.
     var eyeBand: ClosedRange<Double> {
-        switch self { case .portrait: return 104...150; case .white: return 82...146; case .redhead: return 106...144 } // red: smaller face since 9 Nov 2026
+        switch self { case .portrait: return 104...150; case .white: return 82...146; case .redhead: return 120...154; case .curly: return 100...162 } // red: the new pictures of 16 Nov 2026, the eyes at y 137 (closed and open differ on rows 128-147); curly (23 Nov 2026): eyes at y 135, lids from 102 to 160, the talking mouths from 164
     }
     /// The white robot's happy frame has an open mouth, so it stays neutral while silent.
     var smilesWhileListening: Bool { self != .white }
@@ -433,6 +866,7 @@ enum RobotLiveClose {
         case "peer_disconnected", "peer_error": return "Il robot ha chiuso il collegamento e si ricollega da solo in pochi secondi. \(again)"
         case "command_timeout", "invalid_ack": return "Il robot non ha confermato un comando in tempo: collegamento chiuso per sicurezza. \(again)"
         case "rate_limit": return "Troppi dati in un secondo: collegamento chiuso per sicurezza. \(again)"
+        case "app_replaced": return "Un altro collegamento dell’app ha preso il robot. \(again)"
         default: break
         }
         // Any other reason of the relay is shown as it is, but only if it looks like one (short, lowercase words).
@@ -475,13 +909,24 @@ enum RobotLiveClose {
     private(set) static var pageClients = 0
     /// Set by the automatic following: closes its channel and returns true if one was open.
     static var beforePageConnect: (() -> Bool)?
+    /// Set by the app's shared link (RobotSharedLink): it closes itself when another page's client connects, and says so.
+    static var beforeOtherConnect: ((RobotLiveClient) -> Bool)?
     private var counted = false
+    /// This client is one of the pages counted in `pageClients`; a socket exists (connecting or connected).
+    var isCounted: Bool { counted }
+    var linkOpen: Bool { socket != nil }
+    /// The reason the relay gave the last time it closed this link (nil while connected or after a close of the app).
+    private(set) var closeReason: String?
+    /// The app went to the background: why the relay closed the link last time no longer counts (23 Nov 2026: after an
+    /// `app_replaced` the shared link stayed out even when the app came back to the front, «Collega il robot per iniziare»).
+    func forgetCloseReason() { closeReason = nil }
     func connect(token: String) {
-        disconnect()
+        disconnect(); closeReason = nil
         let token = token.trimmingCharacters(in: .whitespacesAndNewlines)
         guard token.count >= 32 else { message = "Salva prima il token nella scheda Robot."; return }
         if !automatic { counted = true; Self.pageClients += 1 }
-        let yielded = !automatic && (Self.beforePageConnect?() ?? false)
+        let followYielded = !automatic && (Self.beforePageConnect?() ?? false), sharedYielded = !automatic && (Self.beforeOtherConnect?(self) ?? false)
+        let yielded = followYielded || sharedYielded
         var request = URLRequest(url: URL(string: "https://robottino-stackchan.example.workers.dev/api/robot/live")!)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         let task = session.webSocketTask(with: request), current = UUID(); revision = current
@@ -498,7 +943,7 @@ enum RobotLiveClose {
                 guard let self, self.revision == current else { return }
                 // Read before disconnect(): the reason the relay gave when it closed, or the status of a refused connection.
                 let reason = task.closeReason.flatMap { String(data: $0, encoding: .utf8) }, status = (task.response as? HTTPURLResponse)?.statusCode
-                self.disconnect(); self.message = RobotLiveClose.message(reason: reason, status: status, error: error.localizedDescription)
+                self.disconnect(); self.closeReason = reason; self.message = RobotLiveClose.message(reason: reason, status: status, error: error.localizedDescription)
             }
         }
         heartbeat = Task { [weak self] in
@@ -525,7 +970,7 @@ enum RobotLiveClose {
             receivedSequence = packet.sequence
             if packet.kind == 4 || packet.kind == 6 {
                 if let frame = try videoAssembler.append(packet) { cameraFrame = frame; onVideo?(frame) }
-            } else if packet.kind == 1 { cameraFrame = packet; onVideo?(packet) } else if packet.kind == 3 { onAudio?(packet.payload) }
+            } else if packet.kind == 1 || packet.kind == 8 { cameraFrame = packet; onVideo?(packet) } else if packet.kind == 3 { onAudio?(packet.payload) }
         case .string(let text):
             guard text.utf8.count <= 8192, let data = text.data(using: .utf8), let object = try JSONSerialization.jsonObject(with: data) as? [String:Any], let type = object["type"] as? String else { throw RobotLiveError.invalid }
             if type == "connected" { socketConnected = true; message = "Canale aperto; attendo il robot." }
@@ -540,9 +985,17 @@ enum RobotLiveClose {
         @unknown default: throw RobotLiveError.invalid
         }
     }
+    /// What goes with camera.start: this app can show JPEG pictures (media kind 8, 14 Nov 2026). A robot or a server
+    /// that does not know them goes on sending the raw picture in pieces, which the app shows as before.
+    nonisolated static var cameraStart: [String: Any] { ["jpeg": true] }
+    /// At most four commands wait for their answer; STOP is never held back by them (review of 17 Nov 2026, R2), nor
+    /// the rover's own stop (code review, 19 Nov 2026) or exploration stop, which the server lets through up to eight.
+    nonisolated static func mayQueue(action: String, pending: Int, move: String? = nil, on: Bool? = nil) -> Bool {
+        action == "stop" || (action == "rover" && move == "stop" && pending < 8) || (action == "explore" && on == false && pending < 8) || pending < 4
+    }
     func command(_ action: String, values: [String:Any] = [:]) async throws {
         guard ready, let socket else { throw RobotLiveError.offline }
-        guard pending.count < 4 else { throw RobotLiveError.busy }
+        guard Self.mayQueue(action: action, pending: pending.count, move: values["move"] as? String, on: values["on"] as? Bool) else { throw RobotLiveError.busy }
         let id = UUID().uuidString, current = revision
         var object = values; object["type"] = "command"; object["id"] = id; object["action"] = action
         let encoded = try JSONSerialization.data(withJSONObject: object)
@@ -813,6 +1266,13 @@ enum RobotWiFiBluetooth {
             result.append(Data(bytes[start..<end])); start = end
         }
         return result
+    }
+    /// A password or a token is never sent back by the robot (host patch `ble-no-secret-echo`, review of 17 Nov 2026,
+    /// R3): it only says {"prop": "wifi.password", "value": "", "secret": true, "set": …, "saved": true}. `saved` comes
+    /// after every write of it, changed or not. A robot with the older host still echoes the value.
+    static func secret(_ data: Data) -> (prop: String, saved: Bool)? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let prop = object["prop"] as? String, prop.hasPrefix("wifi."), object["secret"] as? Bool == true else { return nil }
+        return (prop, object["saved"] as? Bool == true)
     }
     /// Notifications are {"prop": "wifi.ssid", "value": …}; returns the pair when present.
     static func notification(_ data: Data) -> (prop: String, value: String)? {
